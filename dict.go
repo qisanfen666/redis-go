@@ -207,3 +207,17 @@ func (d *Dict) DictRehash(steps int) int {
 
 	return moved
 }
+
+func (d *Dict) DictScan(fn func(cmd []string)) {
+	if d.rehashIdx != -1 {
+		d.DictRehash(int(d.ht[0].size))
+	}
+
+	for i := 0; i < d.ht[0].size; i++ {
+		entry := d.ht[0].table[i]
+		for entry != nil {
+			fn([]string{"SET", entry.key, entry.val})
+			entry = entry.next
+		}
+	}
+}

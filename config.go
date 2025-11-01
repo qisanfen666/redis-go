@@ -1,24 +1,44 @@
 package main
 
-import "redis-go/resp"
+import (
+	"redis-go/resp"
+	"strings"
+)
 
 // 最简配置表（key → 值）
 var configMap = map[string]resp.RespValue{
-	"save":       resp.BulkString(""),   // 返回空字符串而不是空数组
-	"appendonly": resp.BulkString("no"), // 明确返回 "no"
+	"save":       resp.Array{},
+	"appendonly": resp.Array{resp.BulkString("no")},
 }
 
-// ConfigGet 实现 CONFIG GET key [key ...]
-func configGet(keys []resp.RespValue) resp.RespValue {
-	arr := make(resp.Array, 0, len(keys)*2)
-	for _, k := range keys {
-		key := string(k.(resp.BulkString))
-		if val, ok := configMap[key]; ok {
-			arr = append(arr, resp.BulkString(key), val)
-		} else {
-			// 对于不存在的配置项，返回键和空字符串
-			arr = append(arr, resp.BulkString(key), resp.BulkString(""))
-		}
+func configGet(arr resp.Array) resp.RespValue {
+	if len(arr) < 3 || strings.ToUpper(string(arr[1].(resp.BulkString))) != "GET" {
+		return resp.Error("ERR syntax error")
 	}
-	return arr
+
+	key := arr[2].(resp.BulkString)
+
+	if val, exist := configMap[string(key)]; exist {
+		result := make(resp.Array, 2)
+		result[0] = key
+		result[1] = val
+		return result
+	}
+
+	return resp.Null{}
+}
+
+func configSet(arr resp.Array) resp.RespValue {
+	if len(arr) < 4 || strings.ToUpper(string(arr[1].(resp.BulkString))) != "SET" {
+		return resp.Error("ERR syntax error")
+	}
+
+	key := arr[2].(resp.BulkString)
+	val := arr[3]
+	configMap[string(key)] = resp.Array{val}
+
+	if key == "appendonly" && string(val.(resp.BulkString)) == "yes" {
+		_ = openAOF("appendonly.aof")
+	}
+	return resp.SimpleString("OK")
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"redis-go/resp"
 )
@@ -10,6 +11,13 @@ import (
 var Store = DictCreate()
 
 func main() {
+	err := loadAOF("appendonly.aof")
+	if err != nil {
+		log.Fatalf("loadAOF:%v", err)
+	}
+	_ = openAOF("appendonly.aof")
+	startAOFSync()
+
 	lis, err := net.Listen("tcp", ":6380")
 
 	if err != nil {

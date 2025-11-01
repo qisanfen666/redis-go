@@ -1,6 +1,8 @@
 package main
 
-import "hash/fnv"
+import (
+	"hash/fnv"
+)
 
 // 主体字典
 type Dict struct {
@@ -34,14 +36,18 @@ func DictCreate() *Dict {
 		used:      0,
 	}
 
-	d.ht[0].size = 4
-	d.ht[0].mask = d.ht[0].size - 1
-	d.ht[0].table = make([]*dictEntry, d.ht[0].size)
+	d.ht[0] = &hashTable{
+		size:  4,
+		mask:  3,
+		table: make([]*dictEntry, 4),
+	}
+
+	d.ht[1] = nil
 
 	return d
 }
 
-func DictAdd(d *Dict, key, val string) {
+func (d *Dict) DictAdd(key, val string) {
 	//若在rehash,先走一步
 	if d.rehashIdx != -1 {
 		d.DictRehash(1)
@@ -65,20 +71,25 @@ func DictAdd(d *Dict, key, val string) {
 		next: d.ht[0].table[idx],
 	}
 	d.ht[0].table[idx] = newEntry
+	d.used++
 
 	//检查负载因子
-	if float64(d.used)/float64(d.ht[0].size) >= 2 && d.ht[1] == nil {
+	if float64(d.used)/float64(d.ht[0].size) >= 1 && d.ht[1] == nil {
 		newSize := d.ht[0].size * 2
-		d.ht[1].size = newSize
-		d.ht[1].mask = newSize - 1
-		d.ht[1].table = make([]*dictEntry, newSize)
+
+		d.ht[1] = &hashTable{
+			size:  newSize,
+			mask:  newSize - 1,
+			table: make([]*dictEntry, newSize),
+		}
+
 		d.rehashIdx = 0
 	}
 }
 
 func (d *Dict) DictGet(key string) (string, bool) {
 	//若在rehash,先走一步
-	if d.rehashIdx == -1 {
+	if d.rehashIdx != -1 {
 		d.DictRehash(1)
 	}
 
@@ -111,7 +122,7 @@ func (d *Dict) DictGet(key string) (string, bool) {
 
 func (d *Dict) DictDelete(key string) bool {
 	//若在rehash,先走一步
-	if d.rehashIdx == -1 {
+	if d.rehashIdx != -1 {
 		d.DictRehash(1)
 	}
 

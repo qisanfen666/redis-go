@@ -7,7 +7,7 @@ import (
 	"redis-go/resp"
 )
 
-var Store = make(map[string]string)
+var Store = DictCreate()
 
 func main() {
 	lis, err := net.Listen("tcp", ":6380")

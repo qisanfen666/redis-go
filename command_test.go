@@ -14,7 +14,7 @@ func TestPing(t *testing.T) {
 
 func TestSetGet(t *testing.T) {
 	// 先清空 Store
-	Store = make(map[string]string)
+	Store = DictCreate()
 
 	HandleCommand(resp.Array{resp.BulkString("SET"), resp.BulkString("k"), resp.BulkString("v")})
 	reply := HandleCommand(resp.Array{resp.BulkString("GET"), resp.BulkString("k")})
@@ -24,13 +24,13 @@ func TestSetGet(t *testing.T) {
 }
 
 func TestDel(t *testing.T) {
-	Store = make(map[string]string)
-	Store["k"] = "v"
+	Store = DictCreate()
+	Store.DictAdd("k", "v")
 	reply := HandleCommand(resp.Array{resp.BulkString("DEL"), resp.BulkString("k")})
 	if iv, ok := reply.(resp.Integer); !ok || iv != 1 {
 		t.Fatalf("want 1, got %v", reply)
 	}
-	if _, exist := Store["k"]; exist {
+	if _, exist := Store.DictGet("k"); exist {
 		t.Fatal("key should be deleted")
 	}
 }

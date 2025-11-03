@@ -81,7 +81,7 @@ func bgReWriteAOF() {
 		//子进程,遍历写temp-aof.aod
 		temp, _ := os.Create("temp-aof.aof")
 		w := bufio.NewWriter(temp)
-		Store.DictScan(func(cmd []string) {
+		Store.SegScan(func(cmd []string) {
 			arr := make(resp.Array, len(cmd))
 			for i, c := range cmd {
 				arr[i] = resp.BulkString(c)

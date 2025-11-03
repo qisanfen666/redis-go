@@ -47,7 +47,7 @@ func set(arr resp.Array) resp.RespValue {
 	key := string(arr[1].(resp.BulkString))
 	value := string(arr[2].(resp.BulkString))
 	appendAOF([]string{"SET", key, value})
-	Store.DictAdd(key, value)
+	Store.Add(key, value)
 	return resp.SimpleString("OK")
 }
 
@@ -56,7 +56,7 @@ func get(arr resp.Array) resp.RespValue {
 		return resp.Error("ERR wrong command")
 	}
 	key := string(arr[1].(resp.BulkString))
-	val, ok := Store.DictGet(key)
+	val, ok := Store.Get(key)
 	if !ok {
 		return resp.Null{}
 	}
@@ -67,8 +67,8 @@ func del(arr resp.Array) resp.RespValue {
 	deleted := 0
 	for i := 1; i < len(arr); i++ {
 		key := string(arr[i].(resp.BulkString))
-		if _, exist := Store.DictGet(key); exist {
-			Store.DictDelete(key)
+		if _, exist := Store.Get(key); exist {
+			Store.Delete(key)
 			appendAOF([]string{"DEL", key})
 			deleted++
 		}

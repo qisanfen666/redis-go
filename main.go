@@ -5,12 +5,19 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"redis-go/resp"
 )
 
-var Store = DictCreate()
+var Store = NewSegDict()
 
 func main() {
+
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6061", nil))
+	}()
+
 	err := loadAOF("appendonly.aof")
 	if err != nil {
 		log.Fatalf("loadAOF:%v", err)

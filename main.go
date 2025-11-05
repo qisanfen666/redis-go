@@ -8,9 +8,17 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"redis-go/resp"
+	"sync"
+	"time"
 )
 
 var Store = NewSegDict()
+var respArrayPool = sync.Pool{
+	New: func() interface{} {
+		return &resp.Array{}
+	},
+}
+var maxPipeline = 128
 
 func main() {
 
@@ -23,7 +31,7 @@ func main() {
 		log.Fatalf("loadAOF:%v", err)
 	}
 	_ = openAOF("appendonly.aof")
-	startAOFSync()
+	startAsyncAOF()
 
 	lis, err := net.Listen("tcp", ":6380")
 
@@ -45,23 +53,56 @@ func main() {
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	r := bufio.NewReader(conn)
-	w := bufio.NewWriter(conn)
+	r := bufio.NewReaderSize(conn, 16*1024)
+	w := bufio.NewWriterSize(conn, 16*1024)
+
+	//设置超时
+	netConn, ok := conn.(interface {
+		SetReadDeadline(t time.Time) error
+	})
+	hasDeadline := ok
 
 	for {
+		var responses []resp.RespValue
+
+		//读取第一条命令
 		raw, err := readFullRESP(r)
 		if err != nil {
 			return
 		}
-		val, rest, err := resp.ParseRESP(append([]byte{}, raw...))
+
+		//处理第一条命令
+		val, _, err := resp.ParseRESP(append([]byte{}, raw...))
 		if err != nil {
+			w.Write(resp.Error("ERR invalid command").ToBytes())
+			w.Flush()
 			continue
 		}
-		_ = rest
+		responses = append(responses, HandleCommand(val))
 
-		reply := HandleCommand(val)
+		if hasDeadline {
+			netConn.SetReadDeadline(time.Now().Add(10 * time.Microsecond))
 
-		w.Write(reply.ToBytes())
+			for i := 1; i < maxPipeline; i++ {
+				raw, err := readFullRESP(r)
+				if err != nil {
+					break
+				}
+				val, _, err := resp.ParseRESP(append([]byte{}, raw...))
+				if err != nil {
+					w.Write(resp.Error("ERR invalid command").ToBytes())
+					w.Flush()
+					continue
+				}
+				responses = append(responses, HandleCommand(val))
+			}
+
+			netConn.SetReadDeadline(time.Time{})
+		}
+
+		for _, response := range responses {
+			w.Write(response.ToBytes())
+		}
 		w.Flush()
 	}
 }
@@ -76,7 +117,12 @@ func readFullRESP(r *bufio.Reader) ([]byte, error) {
 		buf = append(buf, line...)
 		_, remaining, err := resp.ParseRESP(buf)
 		if err == nil && len(remaining) == 0 {
-			return buf, nil
+			arr := respArrayPool.Get().(*resp.Array)
+			arr.Reset()
+			if err := arr.UnmarshalBinary(buf); err == nil {
+				return buf, nil
+			}
+			respArrayPool.Put(arr)
 		}
 	}
 }

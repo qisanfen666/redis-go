@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"io"
+	"log"
 	"os"
 	"redis-go/resp"
 	"sync"
@@ -12,7 +14,8 @@ import (
 
 var aofWriter *bufio.Writer
 var aofFile *os.File
-var aofMu sync.Mutex
+var aofMu sync.RWMutex
+var aofChan = make(chan []string, 20000) // 缓冲通道，防止阻塞
 
 // 初始化AOF
 func openAOF(path string) error {
@@ -25,21 +28,16 @@ func openAOF(path string) error {
 	return nil
 }
 
-// 追加命令到AOF
+// 追加命令到channel
 func appendAOF(cmd []string) {
 	if aofWriter == nil {
 		return
 	}
-	arr := make(resp.Array, len(cmd))
-	for i, c := range cmd {
-		arr[i] = resp.BulkString(c)
+	select {
+	case aofChan <- cmd: // 非阻塞发送
+	default:
+		log.Println("aofChan is full, command discarded")
 	}
-	buf := arr.ToBytes()
-
-	aofMu.Lock()
-	aofWriter.Write(buf)
-	aofWriter.Flush()
-	aofMu.Unlock()
 }
 
 // 加载时启用旧AOF
@@ -97,24 +95,60 @@ func bgReWriteAOF() {
 		syscall.Wait4(int(pid), nil, 0, nil)
 		os.Rename("temp-aof.aof", "appendonly.aof")
 
-		aofMu.Lock()
+		//aofMu.Lock()
 		aofWriter.Flush()
 		aofFile.Close()
 		aofFile, _ = os.OpenFile("appendonly.aof", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		aofWriter = bufio.NewWriter(aofFile)
-		aofMu.Unlock()
+		//aofMu.Unlock()
 
 	}()
 }
 
-func startAOFSync() {
+// 启动AOF异步写入协程
+func startAsyncAOF() {
 	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		batch := make([][]string, 0, 500)
+
 		for {
-			time.Sleep(time.Second)
-			aofMu.Lock()
-			aofWriter.Flush()
-			aofFile.Sync()
-			aofMu.Unlock()
+			select {
+			case cmd := <-aofChan:
+				batch = append(batch, cmd)
+				if len(batch) >= 500 {
+					flushAOFBatch(batch)
+					batch = batch[:0]
+				}
+			case <-ticker.C:
+				if len(batch) > 0 {
+					flushAOFBatch(batch)
+					batch = batch[:0]
+				}
+			}
+		}
+	}()
+}
+
+func flushAOFBatch(batch [][]string) {
+	go func() {
+		// 非阻塞刷盘：即使刷盘慢，也不影响主请求
+		tmpBuf := bytes.NewBuffer(nil)
+		for _, cmd := range batch {
+			arr := make(resp.Array, len(cmd))
+			for i, c := range cmd {
+				arr[i] = resp.BulkString(c)
+			}
+			tmpBuf.Write(arr.ToBytes())
+		}
+		aofMu.Lock()
+		defer aofMu.Unlock()
+		if _, err := aofWriter.Write(tmpBuf.Bytes()); err != nil {
+			log.Println("flushAOFBatch write error:", err)
+		}
+		if err := aofWriter.Flush(); err != nil {
+			log.Println("flushAOFBatch Flush error:", err)
 		}
 	}()
 }

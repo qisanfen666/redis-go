@@ -38,7 +38,7 @@ func configSet(arr resp.Array) resp.RespValue {
 	configMap[string(key)] = resp.Array{val}
 
 	if key == "appendonly" && string(val.(resp.BulkString)) == "yes" {
-		_ = openAOF("appendonly.aof")
+		//_ = openAOF("appendonly.aof")
 	}
 	return resp.SimpleString("OK")
 }

@@ -8,17 +8,29 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"redis-go/resp"
+	"redis-go/store"
 	"sync"
 	"time"
 )
 
-var Store = NewSegDict()
+var Store = store.Store
+
 var respArrayPool = sync.Pool{
 	New: func() interface{} {
 		return &resp.Array{}
 	},
 }
-var maxPipeline = 128
+var bufioReaderPool = sync.Pool{
+	New: func() interface{} {
+		return bufio.NewReaderSize(nil, 16*1024)
+	},
+}
+var bufioWriterPool = sync.Pool{
+	New: func() interface{} {
+		return bufio.NewWriterSize(nil, 16*1024)
+	},
+}
+var maxPipeline = 256
 
 func main() {
 
@@ -26,12 +38,10 @@ func main() {
 		log.Println(http.ListenAndServe("localhost:6061", nil))
 	}()
 
-	err := loadAOF("appendonly.aof")
-	if err != nil {
-		log.Fatalf("loadAOF:%v", err)
-	}
-	_ = openAOF("appendonly.aof")
-	startAsyncAOF()
+	// if err := initAOFIOUring("appendonly.aof"); err != nil {
+	// 	log.Fatalf("init AOF failed: %v", err)
+	// }
+	// defer cleanup()
 
 	lis, err := net.Listen("tcp", ":6380")
 
@@ -53,8 +63,16 @@ func main() {
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
-	r := bufio.NewReaderSize(conn, 16*1024)
-	w := bufio.NewWriterSize(conn, 16*1024)
+	r := bufioReaderPool.Get().(*bufio.Reader)
+	r.Reset(conn)
+	defer func() {
+		bufioReaderPool.Put(r)
+	}()
+	w := bufioWriterPool.Get().(*bufio.Writer)
+	w.Reset(conn)
+	defer func() {
+		bufioWriterPool.Put(w)
+	}()
 
 	//设置超时
 	netConn, ok := conn.(interface {

@@ -1,10 +1,13 @@
-package main
+package store
 
 import (
 	"log"
+	"redis-go/hash"
 	"sync/atomic"
 	"unsafe"
 )
+
+var Store = NewSegDict()
 
 // const segmentShift = 5  32段
 const segmentMask = 31
@@ -62,7 +65,7 @@ func NewSegDict() *SegDict {
 }
 
 func (s *SegDict) Add(key, val string) {
-	h := murmur3Hash(key)
+	h := hash.Murmur3Hash(key)
 	seg := s.segments[h&segmentMask]
 
 	idx := h & uint32((*segTable)(seg.ht[0]).mask)
@@ -88,7 +91,7 @@ func (s *SegDict) Add(key, val string) {
 }
 
 func (s *SegDict) Get(key string) (string, bool) {
-	h := murmur3Hash(key)
+	h := hash.Murmur3Hash(key)
 	seg := s.segments[h&segmentMask]
 
 	idx0 := h & uint32((*segTable)(seg.ht[0]).mask)
@@ -124,7 +127,7 @@ func (s *SegDict) Get(key string) (string, bool) {
 }
 
 func (s *SegDict) Delete(key string) bool {
-	h := murmur3Hash(key)
+	h := hash.Murmur3Hash(key)
 	seg := s.segments[h&segmentMask]
 
 	seg.segRehash()
@@ -282,7 +285,7 @@ func (s *Segment) segRehash() int {
 		oldHead := (*dictEntry)(atomic.LoadPointer(&oldBucket.head))
 		for e := oldHead; e != nil; e = e.next {
 			// 计算节点在新表中的桶索引
-			newIdx := murmur3Hash(e.key) & uint32((*segTable)(newTable).mask)
+			newIdx := hash.Murmur3Hash(e.key) & uint32((*segTable)(newTable).mask)
 			newBucket := (*segTable)(newTable).buckets[newIdx]
 
 			// 创建新节点（next指向新桶的当前head）

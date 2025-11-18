@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"redis-go/list"
 	"redis-go/resp"
 	"redis-go/ttl"
 	"redis-go/zset"
@@ -39,6 +40,16 @@ func HandleCommand(v resp.RespValue) resp.RespValue {
 		return zscore(arr)
 	case "ZREM":
 		return zrem(arr)
+	case "LPUSH":
+		return lpush(arr)
+	case "RPUSH":
+		return rpush(arr)
+	case "LPOP":
+		return lpop(arr)
+	case "RPOP":
+		return rpop(arr)
+	case "LRANGE":
+		return lrange(arr)
 	case "CONFIG":
 		return config(arr)
 	case "BGREWRITEAOF":
@@ -229,6 +240,121 @@ func zrem(arr resp.Array) resp.RespValue {
 	}
 
 	return resp.Integer(int64(removed))
+}
+
+func lpush(arr resp.Array) resp.RespValue {
+	if len(arr) < 3 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+
+	l, exist := Store.Lists[key]
+	if !exist {
+		l = list.NewList()
+		Store.Lists[key] = l
+	}
+	for i := 2; i < len(arr); i++ {
+		val := string(arr[i].(resp.BulkString))
+		l.LPush(val)
+	}
+	return resp.Integer(int64(l.Len()))
+}
+
+func rpush(arr resp.Array) resp.RespValue {
+	if len(arr) < 3 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+
+	l, exist := Store.Lists[key]
+	if !exist {
+		l = list.NewList()
+		Store.Lists[key] = l
+	}
+	for i := 2; i < len(arr); i++ {
+		val := string(arr[i].(resp.BulkString))
+		l.RPush(val)
+	}
+	return resp.Integer(int64(l.Len()))
+}
+
+func lpop(arr resp.Array) resp.RespValue {
+	if len(arr) < 2 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+	var count int
+	if len(arr) == 3 {
+		count, _ = strconv.Atoi(string(arr[2].(resp.BulkString)))
+	} else {
+		count = 1
+	}
+	l, exist := Store.Lists[key]
+	if !exist {
+		return resp.Null{}
+	}
+	out := make(resp.Array, 0, count)
+	var val string
+	for i := 0; i < count; i++ {
+		val = l.LPop()
+		out = append(out, resp.BulkString(val))
+		if l.Len() == 0 {
+			delete(Store.Lists, key)
+			return out
+		}
+	}
+
+	return out
+}
+
+func rpop(arr resp.Array) resp.RespValue {
+	if len(arr) < 2 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+	var count int
+	if len(arr) == 3 {
+		count, _ = strconv.Atoi(string(arr[2].(resp.BulkString)))
+	} else {
+		count = 1
+	}
+	l, exist := Store.Lists[key]
+	if !exist {
+		return resp.Null{}
+	}
+	out := make(resp.Array, 0, count)
+	var val string
+	for i := 0; i < count; i++ {
+		val = l.RPop()
+		out = append(out, resp.BulkString(val))
+		if l.Len() == 0 {
+			delete(Store.Lists, key)
+			return out
+		}
+	}
+
+	return out
+}
+
+func lrange(arr resp.Array) resp.RespValue {
+	if len(arr) != 4 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+	start, _ := strconv.Atoi(string(arr[2].(resp.BulkString)))
+	end, _ := strconv.Atoi(string(arr[3].(resp.BulkString)))
+
+	l, exist := Store.Lists[key]
+	if !exist {
+		return resp.Array{}
+	}
+	vals := l.LRange(start, end)
+	out := make(resp.Array, 0, len(vals))
+	for _, val := range vals {
+		out = append(out, resp.BulkString(val))
+	}
+
+	return out
 }
 
 func config(arr resp.Array) resp.RespValue {

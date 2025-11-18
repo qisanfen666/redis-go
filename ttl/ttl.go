@@ -3,6 +3,7 @@ package ttl
 import (
 	"container/heap"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"redis-go/store"
@@ -48,6 +49,12 @@ var (
 	onceTTL sync.Once
 )
 
+var expiredKeys int64
+
+func ExpiredKeys() int64 {
+	return atomic.LoadInt64(&expiredKeys)
+}
+
 func SetTTL(key string, sec int) {
 	expireAt := time.Now().Add(time.Duration(sec) * time.Second).UnixNano()
 	ttlMu.Lock()
@@ -70,6 +77,7 @@ func IsExpired(key string) bool {
 	if time.Now().UnixNano() > expireAt {
 		store.Store.Delete(key)
 		DelTTL(key)
+		atomic.AddInt64(&expiredKeys, 1)
 		return true
 	}
 	return false
@@ -105,18 +113,18 @@ func startTTLCleaner() {
 			tk := time.NewTicker(100 * time.Millisecond)
 			defer tk.Stop()
 			for range tk.C {
-				cleanOneBucket()
+				cleanExpiredSamples(20)
 			}
 		}()
 	})
 }
 
-func cleanOneBucket() {
+func cleanExpiredSamples(max int) {
 	ttlMu.Lock()
 	defer ttlMu.Unlock()
 	now := time.Now().UnixNano()
-	n := 20
-	for i := 0; i < n && ttlH.Len() > 0; i++ {
+	n := 0
+	for n < max && ttlH.Len() > 0 {
 		entry := (*ttlH)[0]
 		if now < entry.expireAt {
 			break
@@ -124,6 +132,8 @@ func cleanOneBucket() {
 		heap.Pop(ttlH)
 		delete(ttlMap, entry.key)
 		store.Store.Delete(entry.key)
+		atomic.AddInt64(&expiredKeys, 1)
+		n++
 	}
 }
 

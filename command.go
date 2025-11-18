@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"redis-go/resp"
 	"redis-go/ttl"
+	"redis-go/zset"
 	"strconv"
 	"strings"
 )
@@ -29,11 +31,21 @@ func HandleCommand(v resp.RespValue) resp.RespValue {
 		return expire(arr)
 	case "TTL":
 		return handleTTL(arr)
+	case "ZADD":
+		return zadd(arr)
+	case "ZRANGE":
+		return zrange(arr)
+	case "ZSCORE":
+		return zscore(arr)
+	case "ZREM":
+		return zrem(arr)
 	case "CONFIG":
 		return config(arr)
 	case "BGREWRITEAOF":
 		//bgReWriteAOF()
 		return resp.SimpleString("Background AOF rewrite started")
+	case "INFO":
+		return info(arr)
 	default:
 		return resp.Error("ERR unknow command")
 	}
@@ -47,13 +59,37 @@ func ping(arr resp.Array) resp.RespValue {
 }
 
 func set(arr resp.Array) resp.RespValue {
-	if len(arr) != 3 {
+	if len(arr) < 3 {
 		return resp.Error("ERR wrong command")
 	}
 	key := string(arr[1].(resp.BulkString))
 	value := string(arr[2].(resp.BulkString))
+
+	var expireTime int = -1
+
+	for i := 3; i < len(arr); i++ {
+		option := strings.ToUpper(string(arr[i].(resp.BulkString)))
+		switch option {
+		case "EX":
+			if i+1 >= len(arr) {
+				return resp.Error("ERR wrong number of arguments")
+			}
+			sec, _ := strconv.Atoi(string(arr[i+1].(resp.BulkString)))
+			expireTime = int(sec)
+			i++
+		default:
+			return resp.Error("ERR unknown option")
+		}
+	}
 	//appendAOF([]string{"SET", key, value})
 	Store.Add(key, value)
+
+	if expireTime > 0 {
+		ttl.SetTTL(key, expireTime)
+	} else {
+		ttl.DelTTL(key)
+	}
+
 	return resp.SimpleString("OK")
 }
 
@@ -62,6 +98,9 @@ func get(arr resp.Array) resp.RespValue {
 		return resp.Error("ERR wrong command")
 	}
 	key := string(arr[1].(resp.BulkString))
+	if ttl.IsExpired(key) {
+		return resp.Null{}
+	}
 	val, ok := Store.Get(key)
 	if !ok {
 		return resp.Null{}
@@ -105,6 +144,93 @@ func handleTTL(arr resp.Array) resp.RespValue {
 	return resp.Integer(left)
 }
 
+func zadd(arr resp.Array) resp.RespValue {
+	if len(arr)%2 != 0 || len(arr) < 4 {
+		return resp.Error("ERR syntax error")
+	}
+
+	key := string(arr[1].(resp.BulkString))
+	zs, ok := Store.Zsets[key]
+	if !ok {
+		zs = zset.NewZset()
+		Store.Zsets[key] = zs
+	}
+	added := 0
+	for i := 2; i < len(arr); i += 2 {
+		score, err := strconv.ParseFloat(string(arr[i].(resp.BulkString)), 64)
+		if err != nil {
+			return resp.Error("ERR syntax error")
+		}
+		member := string(arr[i+1].(resp.BulkString))
+		_, exist := zs.Score(member)
+		zs.Add(member, score)
+		if !exist {
+			added++
+		}
+	}
+
+	return resp.Integer(int64(added))
+}
+
+func zrange(arr resp.Array) resp.RespValue {
+	if len(arr) < 4 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+	start, _ := strconv.Atoi(string(arr[2].(resp.BulkString)))
+	end, _ := strconv.Atoi(string(arr[3].(resp.BulkString)))
+
+	//withScores := len(arr) == 5 && strings.ToUpper(string(arr[4].(resp.BulkString))) == "WITHSCORES"
+
+	zs, ok := Store.Zsets[key]
+	if !ok {
+		return resp.Array{}
+	}
+	nodes := zs.Range(int64(start), int64(end))
+	capacity := len(nodes)
+	out := make(resp.Array, 0, capacity)
+	for _, node := range nodes {
+		out = append(out, resp.BulkString(node))
+	}
+
+	return out
+}
+
+func zscore(arr resp.Array) resp.RespValue {
+	if len(arr) < 3 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+	member := string(arr[2].(resp.BulkString))
+	score, ok := Store.Zsets[key].Score(member)
+	if !ok {
+		return resp.Null{}
+	}
+
+	return resp.BulkString(strconv.FormatFloat(score, 'f', -1, 64))
+}
+
+func zrem(arr resp.Array) resp.RespValue {
+	if len(arr) < 3 {
+		return resp.Error("ERR syntax error")
+	}
+	key := string(arr[1].(resp.BulkString))
+	removed := 0
+	for i := 2; i < len(arr); i++ {
+		member := string(arr[i].(resp.BulkString))
+		score, _ := Store.Zsets[key].Score(member)
+		ok := Store.Zsets[key].Remove(member, score)
+		if ok {
+			removed++
+		}
+	}
+	if Store.Zsets[key].Len() == 0 {
+		delete(Store.Zsets, key)
+	}
+
+	return resp.Integer(int64(removed))
+}
+
 func config(arr resp.Array) resp.RespValue {
 	switch strings.ToUpper(string(arr[1].(resp.BulkString))) {
 	case "GET":
@@ -114,4 +240,13 @@ func config(arr resp.Array) resp.RespValue {
 	default:
 		return resp.Error("ERR syntax error")
 	}
+}
+
+func info(arr resp.Array) resp.RespValue {
+	var b strings.Builder
+	b.WriteString("# Server\r\n")
+	b.WriteString("redis_version:0.1.0\r\n")
+	b.WriteString("# Keyspace\r\n")
+	b.WriteString(fmt.Sprintf("expired_keys:%d\r\n", ttl.ExpiredKeys()))
+	return resp.BulkString(b.String())
 }

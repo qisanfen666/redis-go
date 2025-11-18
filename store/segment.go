@@ -3,6 +3,7 @@ package store
 import (
 	"log"
 	"redis-go/hash"
+	"redis-go/zset"
 	"sync/atomic"
 	"unsafe"
 )
@@ -36,10 +37,11 @@ type segTable struct {
 
 type SegDict struct {
 	segments [32]*Segment
+	Zsets    map[string]*(zset.Zset)
 }
 
 func NewSegDict() *SegDict {
-	d := &SegDict{}
+	d := &SegDict{Zsets: make(map[string]*(zset.Zset))}
 
 	for i := 0; i < 32; i++ {
 		seg := &Segment{

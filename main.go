@@ -9,11 +9,20 @@ import (
 	_ "net/http/pprof"
 	"redis-go/resp"
 	"redis-go/store"
+	"strings"
 	"sync"
 	"time"
 )
 
 var Store = store.Store
+
+type clientConn struct {
+	conn net.Conn
+	tx   *ClientTx
+	r    *bufio.Reader
+	w    *bufio.Writer
+	mu   sync.RWMutex
+}
 
 var respArrayPool = sync.Pool{
 	New: func() interface{} {
@@ -61,8 +70,6 @@ func main() {
 }
 
 func handleConn(conn net.Conn) {
-	defer conn.Close()
-
 	r := bufioReaderPool.Get().(*bufio.Reader)
 	r.Reset(conn)
 	defer func() {
@@ -74,8 +81,17 @@ func handleConn(conn net.Conn) {
 		bufioWriterPool.Put(w)
 	}()
 
+	cc := &clientConn{
+		conn: conn,
+		tx:   NewClientTx(),
+		r:    r,
+		w:    w,
+	}
+
+	defer cc.Close()
+
 	//设置超时
-	netConn, ok := conn.(interface {
+	netConn, ok := cc.conn.(interface {
 		SetReadDeadline(t time.Time) error
 	})
 	hasDeadline := ok
@@ -84,7 +100,7 @@ func handleConn(conn net.Conn) {
 		var responses []resp.RespValue
 
 		//读取第一条命令
-		raw, err := readFullRESP(r)
+		raw, err := readFullRESP(cc.r)
 		if err != nil {
 			return
 		}
@@ -92,37 +108,56 @@ func handleConn(conn net.Conn) {
 		//处理第一条命令
 		val, _, err := resp.ParseRESP(append([]byte{}, raw...))
 		if err != nil {
-			w.Write(resp.Error("ERR invalid command").ToBytes())
-			w.Flush()
+			cc.w.Write(resp.Error("ERR invalid command").ToBytes())
+			cc.w.Flush()
 			continue
 		}
-		responses = append(responses, HandleCommand(val))
+		responses = append(responses, cc.handleOne(val))
 
 		if hasDeadline {
 			netConn.SetReadDeadline(time.Now().Add(10 * time.Microsecond))
 
 			for i := 1; i < maxPipeline; i++ {
-				raw, err := readFullRESP(r)
+				raw, err := readFullRESP(cc.r)
 				if err != nil {
 					break
 				}
 				val, _, err := resp.ParseRESP(append([]byte{}, raw...))
 				if err != nil {
-					w.Write(resp.Error("ERR invalid command").ToBytes())
-					w.Flush()
+					cc.w.Write(resp.Error("ERR invalid command").ToBytes())
+					cc.w.Flush()
 					continue
 				}
-				responses = append(responses, HandleCommand(val))
+				responses = append(responses, cc.handleOne(val))
 			}
 
 			netConn.SetReadDeadline(time.Time{})
 		}
 
 		for _, response := range responses {
-			w.Write(response.ToBytes())
+			cc.w.Write(response.ToBytes())
 		}
-		w.Flush()
+		cc.w.Flush()
 	}
+}
+
+func (cc *clientConn) handleOne(val resp.RespValue) resp.RespValue {
+	arr, ok := val.(resp.Array)
+	if !ok || len(arr) == 0 {
+		return resp.Error("ERR unknow command")
+	}
+	cmd, ok := arr[0].(resp.BulkString)
+	if !ok {
+		return resp.Error("ERR unknow command")
+	}
+
+	switch strings.ToUpper(string(cmd)) {
+	case "MULTI", "EXEC", "DISCARD":
+		return HandleCommand(val, cc)
+	}
+	return cc.tx.enqueue(func() resp.RespValue {
+		return HandleCommand(val, cc)
+	})
 }
 
 func readFullRESP(r *bufio.Reader) ([]byte, error) {
@@ -143,4 +178,9 @@ func readFullRESP(r *bufio.Reader) ([]byte, error) {
 			respArrayPool.Put(arr)
 		}
 	}
+}
+
+func (cc *clientConn) Close() {
+	psHub.removeAllSubscriptions(cc)
+	cc.conn.Close()
 }

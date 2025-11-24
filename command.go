@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-func HandleCommand(v resp.RespValue) resp.RespValue {
+func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
 	arr, ok := v.(resp.Array)
 	if !ok || len(arr) == 0 {
 		return resp.Error("ERR unknow command")
@@ -50,6 +50,18 @@ func HandleCommand(v resp.RespValue) resp.RespValue {
 		return rpop(arr)
 	case "LRANGE":
 		return lrange(arr)
+	case "MULTI":
+		return cc.tx.multi()
+	case "DISCARD":
+		return cc.tx.discard()
+	case "EXEC":
+		return cc.tx.exec()
+	case "PUBLISH":
+		return publish(arr)
+	case "SUBSCRIBE":
+		return subscribe(arr, cc)
+	case "UNSUBSCRIBE":
+		return unsubscribe(arr, cc)
 	case "CONFIG":
 		return config(arr)
 	case "BGREWRITEAOF":
@@ -352,6 +364,60 @@ func lrange(arr resp.Array) resp.RespValue {
 	out := make(resp.Array, 0, len(vals))
 	for _, val := range vals {
 		out = append(out, resp.BulkString(val))
+	}
+
+	return out
+}
+
+func publish(arr resp.Array) resp.RespValue {
+	if len(arr) != 3 {
+		return resp.Error("ERR syntax error")
+	}
+
+	channel := string(arr[1].(resp.BulkString))
+	message := string(arr[2].(resp.BulkString))
+	n := psHub.publish(channel, message)
+
+	return resp.Integer(int64(n))
+}
+
+func subscribe(arr resp.Array, cc *clientConn) resp.RespValue {
+	if len(arr) < 2 {
+		return resp.Error("ERR syntax error")
+	}
+
+	var channel string
+	out := resp.Array{}
+
+	for i := 1; i < len(arr); i++ {
+		channel = string(arr[i].(resp.BulkString))
+		count := psHub.subscribe(channel, cc)
+		out = append(out,
+			resp.BulkString("subscribe"),
+			resp.BulkString(channel),
+			resp.Integer(count),
+		)
+	}
+
+	return out
+}
+
+func unsubscribe(arr resp.Array, cc *clientConn) resp.RespValue {
+	if len(arr) < 2 {
+		return resp.Error("ERR syntax error")
+	}
+
+	var channel string
+	out := resp.Array{}
+
+	for i := 1; i < len(arr); i++ {
+		channel = string(arr[i].(resp.BulkString))
+		count := psHub.unsubscribe(channel, cc)
+		out = append(out,
+			resp.BulkString("unsubscribe"),
+			resp.BulkString(channel),
+			resp.Integer(count),
+		)
 	}
 
 	return out

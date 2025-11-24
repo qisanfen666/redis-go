@@ -1,14 +1,18 @@
 package main
 
 import (
+	"redis-go/evict"
 	"redis-go/resp"
+	"strconv"
 	"strings"
 )
 
 // 最简配置表（key → 值）
 var configMap = map[string]resp.RespValue{
-	"save":       resp.Array{},
-	"appendonly": resp.Array{resp.BulkString("no")},
+	"save":             resp.Array{},
+	"appendonly":       resp.Array{resp.BulkString("no")},
+	"maxmemory":        resp.Array{resp.BulkString("0")},
+	"maxmemory-policy": resp.Array{resp.BulkString("allkeys-lru")},
 }
 
 func configGet(arr resp.Array) resp.RespValue {
@@ -16,16 +20,13 @@ func configGet(arr resp.Array) resp.RespValue {
 		return resp.Error("ERR syntax error")
 	}
 
-	key := arr[2].(resp.BulkString)
+	key := strings.ToLower(string(arr[2].(resp.BulkString)))
 
-	if val, exist := configMap[string(key)]; exist {
-		result := make(resp.Array, 2)
-		result[0] = key
-		result[1] = val
-		return result
+	if val, exist := configMap[key]; exist {
+		return resp.Array{arr[2], val}
 	}
 
-	return resp.Null{}
+	return resp.Array{}
 }
 
 func configSet(arr resp.Array) resp.RespValue {
@@ -33,12 +34,47 @@ func configSet(arr resp.Array) resp.RespValue {
 		return resp.Error("ERR syntax error")
 	}
 
-	key := arr[2].(resp.BulkString)
+	key := strings.ToLower(string(arr[2].(resp.BulkString)))
 	val := arr[3]
-	configMap[string(key)] = resp.Array{val}
-
-	if key == "appendonly" && string(val.(resp.BulkString)) == "yes" {
-		//_ = openAOF("appendonly.aof")
+	switch key {
+	case "maxmemory":
+		bs, ok := val.(resp.BulkString)
+		if !ok {
+			return resp.Error("ERR value is not an integer or out of range")
+		}
+		maxBytes, err := strconv.ParseInt(string(bs), 10, 64)
+		if err != nil || maxBytes < 0 {
+			return resp.Error("ERR value is not an integer or out of range")
+		}
+		evict.Config.MaxMemory = maxBytes
+		configMap[key] = resp.Array{resp.BulkString(strconv.FormatInt(maxBytes, 10))}
+	case "maxmemory-policy":
+		bs, ok := val.(resp.BulkString)
+		if !ok {
+			return resp.Error("ERR maxmemory-policy must be a string")
+		}
+		pol := strings.ToLower(string(bs))
+		switch pol {
+		case "noeviction", "allkeys-lru", "allkeys-lfu":
+			evict.Config.Policy = evictPolicyFromString(pol)
+			configMap[key] = resp.Array{resp.BulkString(pol)}
+		default:
+			return resp.Error("ERR unsupported maxmemory-policy")
+		}
+	default:
+		configMap[key] = resp.Array{val}
 	}
+
 	return resp.SimpleString("OK")
+}
+
+func evictPolicyFromString(s string) evict.Policy {
+	switch s {
+	case "allkeys-lru":
+		return evict.PolicyAllKeysLRU
+	case "allkeys-lfu":
+		return evict.PolicyAllKeysLFU
+	default:
+		return evict.PolicyNone // noeviction
+	}
 }

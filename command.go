@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"redis-go/evict"
 	"redis-go/list"
 	"redis-go/resp"
 	"redis-go/ttl"
@@ -107,6 +108,10 @@ func set(arr resp.Array) resp.RespValue {
 	//appendAOF([]string{"SET", key, value})
 	Store.Add(key, value)
 
+	evict.UpdateMemoryUsage(evict.EstimateMemoryUsage(key, value))
+	evict.Touch(key)
+	maybeEvict()
+
 	if expireTime > 0 {
 		ttl.SetTTL(key, expireTime)
 	} else {
@@ -128,6 +133,7 @@ func get(arr resp.Array) resp.RespValue {
 	if !ok {
 		return resp.Null{}
 	}
+	evict.Touch(key)
 	return resp.BulkString(val)
 }
 
@@ -269,6 +275,7 @@ func lpush(arr resp.Array) resp.RespValue {
 		val := string(arr[i].(resp.BulkString))
 		l.LPush(val)
 	}
+	maybeEvict()
 	return resp.Integer(int64(l.Len()))
 }
 
@@ -287,6 +294,7 @@ func rpush(arr resp.Array) resp.RespValue {
 		val := string(arr[i].(resp.BulkString))
 		l.RPush(val)
 	}
+	maybeEvict()
 	return resp.Integer(int64(l.Len()))
 }
 
@@ -441,4 +449,13 @@ func info(arr resp.Array) resp.RespValue {
 	b.WriteString("# Keyspace\r\n")
 	b.WriteString(fmt.Sprintf("expired_keys:%d\r\n", ttl.ExpiredKeys()))
 	return resp.BulkString(b.String())
+}
+
+func maybeEvict() {
+	if evict.Config.MaxMemory <= 0 {
+		return
+	}
+	for evict.GetMemoryUsage() > evict.Config.MaxMemory {
+		evict.Evict(1) // 一次删一个，平滑
+	}
 }

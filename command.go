@@ -68,6 +68,8 @@ func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
 	case "BGREWRITEAOF":
 		//bgReWriteAOF()
 		return resp.SimpleString("Background AOF rewrite started")
+	case "BGSAVE":
+		return bgsave()
 	case "INFO":
 		return info(arr)
 	default:
@@ -116,6 +118,10 @@ func set(arr resp.Array) resp.RespValue {
 		ttl.SetTTL(key, expireTime)
 	} else {
 		ttl.DelTTL(key)
+	}
+
+	if raftNode != nil && raftNode.IsLeader() {
+		raftNode.Propose("SET" + " " + key + " " + value)
 	}
 
 	return resp.SimpleString("OK")

@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
+	"redis-go/raft"
 	"redis-go/resp"
 	"redis-go/store"
 	"strings"
@@ -41,18 +44,52 @@ var bufioWriterPool = sync.Pool{
 }
 var maxPipeline = 256
 
+//var addrs = []string{"127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"}
+
+var raftNode *raft.RaftNode
+
+var (
+	redisAddr = flag.String("redis", ":6380", "redis listen addr")
+	pprofAddr = flag.String("pprof", ":0", "pprof addr,:0=disable")
+)
+
 func main() {
 
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6061", nil))
-	}()
+	//raft
+	id := flag.Int("id", 1, "node ID")
+	addr := flag.String("addr", ":7001", "listen addr")
+	peers := flag.String("peers", "", "comma separated list of peers")
+	flag.Parse()
+	var peerList []string
+	if *peers != "" {
+		peerList = strings.Split(*peers, ",")
+	}
+	raftNode = raft.NewRaftNode(*id, *addr, peerList)
+
+	if *pprofAddr != ":0" {
+		go func() {
+			log.Println(http.ListenAndServe(*pprofAddr, nil))
+		}()
+	}
 
 	// if err := initAOFIOUring("appendonly.aof"); err != nil {
 	// 	log.Fatalf("init AOF failed: %v", err)
 	// }
 	// defer cleanup()
 
-	lis, err := net.Listen("tcp", ":6380")
+	//加载RDB
+	if err := loadRDB(); err != nil {
+		log.Fatalf("load RDB failed: %v", err)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "bgsave" {
+		if err := doSave(); err != nil {
+			log.Fatalf("BGSAVE failed: %v", err)
+		}
+		log.Println("BGSAVE completed")
+		return
+	}
+
+	lis, err := net.Listen("tcp", *redisAddr)
 
 	if err != nil {
 		panic(err)

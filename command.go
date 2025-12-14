@@ -66,7 +66,7 @@ func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
 	case "CONFIG":
 		return config(arr)
 	case "BGREWRITEAOF":
-		//bgReWriteAOF()
+		bgReWriteAOF()
 		return resp.SimpleString("Background AOF rewrite started")
 	case "BGSAVE":
 		return bgsave()
@@ -107,7 +107,7 @@ func set(arr resp.Array) resp.RespValue {
 			return resp.Error("ERR unknown option")
 		}
 	}
-	//appendAOF([]string{"SET", key, value})
+	appendAOF([]string{"SET", key, value})
 	Store.Add(key, value)
 
 	evict.UpdateMemoryUsage(evict.EstimateMemoryUsage(key, value))
@@ -149,7 +149,7 @@ func del(arr resp.Array) resp.RespValue {
 		key := string(arr[i].(resp.BulkString))
 		if _, exist := Store.Get(key); exist {
 			Store.Delete(key)
-			//appendAOF([]string{"DEL", key})
+			appendAOF([]string{"DEL", key})
 			deleted++
 		}
 	}

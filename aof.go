@@ -1,232 +1,150 @@
 package main
 
-// import (
-// 	"fmt"
-// 	"log"
-// 	"os"
-// 	"syscall"
-// 	"time"
+import (
+	"bufio"
+	"io"
+	"log"
+	"os"
+	"redis-go/resp"
+	"strconv"
+	"sync"
+	"time"
+)
 
-// 	"github.com/iceber/iouring-go"
-// )
+const aofFileName = "appendonly.aof"
 
-// // var aofWriter *bufio.Writer
-// // var aofFile *os.File
-// // var aofFd int
-// // var aofMu sync.RWMutex
-// // var aofChan = make(chan []string, 20000) // 缓冲通道，防止阻塞
+var (
+	aofMu    sync.RWMutex
+	aofFile  *os.File
+	aofBuf   *bufio.Writer
+	aofState int32  = 1
+	fsPolicy string = "everysec"
+)
 
-// // 初始化AOF
-// // func openAOF(path string) error {
-// // 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-// // 	if err != nil {
-// // 		return err
-// // 	}
-// // 	aofFd = int(f.Fd())
-// // 	aofFile = f
-// // 	//aofWriter = bufio.NewWriter(aofFile)
-// // 	return nil
-// // }
+func initAOF() error {
+	aofMu.Lock()
+	defer aofMu.Unlock()
 
-// // // 追加命令到channel
-// // func appendAOF(cmd []string) {
-// // 	if aofWriter == nil {
-// // 		return
-// // 	}
-// // 	select {
-// // 	case aofChan <- cmd: // 非阻塞发送
-// // 	default:
-// // 		log.Println("aofChan is full, command discarded")
-// // 	}
-// // }
+	f, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	aofFile = f
+	aofBuf = bufio.NewWriter(f)
+	return nil
+}
 
-// // // 加载时启用旧AOF
-// // func loadAOF(path string) error {
-// // 	f, err := os.Open(path)
-// // 	if os.IsNotExist(err) {
-// // 		return nil
-// // 	}
-// // 	if err != nil {
-// // 		return err
-// // 	}
-// // 	defer f.Close()
+func closeAOF() {
+	aofMu.Lock()
+	defer aofMu.Unlock()
 
-// // 	data, err := io.ReadAll(f)
-// // 	if err != nil {
-// // 		return err
-// // 	}
-// // 	if len(data) == 0 {
-// // 		return nil
-// // 	}
+	if aofBuf != nil {
+		aofBuf.Flush()
+	}
+	if aofFile != nil {
+		aofFile.Sync()
+		aofFile.Close()
+	}
+}
 
-// // 	for len(data) > 0 {
-// // 		val, remain, err := resp.ParseRESP(data)
-// // 		if err != nil {
-// // 			return err
-// // 		}
-// // 		if val == nil {
-// // 			break
-// // 		}
-// // 		HandleCommand(val)
-// // 		data = remain
-// // 	}
-// // 	return nil
-// // }
+func appendAOF(cmd []string) {
+	if aofState == 0 {
+		return
+	}
+	aofMu.Lock()
+	defer aofMu.Unlock()
 
-// // func bgReWriteAOF() {
-// // 	pid, _, _ := syscall.Syscall(syscall.SYS_FORK, 0, 0, 0)
-// // 	if pid == 0 {
-// // 		//子进程,遍历写temp-aof.aod
-// // 		temp, _ := os.Create("temp-aof.aof")
-// // 		w := bufio.NewWriter(temp)
-// // 		Store.SegScan(func(cmd []string) {
-// // 			arr := make(resp.Array, len(cmd))
-// // 			for i, c := range cmd {
-// // 				arr[i] = resp.BulkString(c)
-// // 			}
-// // 			w.Write(arr.ToBytes())
-// // 		})
-// // 		w.Flush()
-// // 		temp.Close()
-// // 		os.Exit(0)
-// // 	}
-// // 	//父进程,后台wait+rename
-// // 	go func() {
-// // 		syscall.Wait4(int(pid), nil, 0, nil)
-// // 		os.Rename("temp-aof.aof", "appendonly.aof")
+	aofBuf.WriteByte('*')
+	aofBuf.WriteString(strconv.Itoa(len(cmd)))
+	aofBuf.WriteString("\r\n")
+	for _, arg := range cmd {
+		aofBuf.WriteByte('$')
+		aofBuf.WriteString(strconv.Itoa(len(arg)))
+		aofBuf.WriteString("\r\n")
+		aofBuf.WriteString(arg)
+		aofBuf.WriteString("\r\n")
+	}
 
-// // 		//aofMu.Lock()
-// // 		aofWriter.Flush()
-// // 		aofFile.Close()
-// // 		aofFile, _ = os.OpenFile("appendonly.aof", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-// // 		aofWriter = bufio.NewWriter(aofFile)
-// // 		//aofMu.Unlock()
+}
 
-// // 	}()
-// // }
+func aofFsyncEverySec() {
+	if fsPolicy != "everysec" {
+		return
+	}
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
 
-// // // 启动AOF异步写入协程
-// // func startAsyncAOF() {
-// // 	go func() {
-// // 		ticker := time.NewTicker(100 * time.Millisecond)
-// // 		defer ticker.Stop()
+	for range tick.C {
+		aofMu.Lock()
+		aofBuf.Flush()
+		aofFile.Sync()
+		aofMu.Unlock()
+	}
+}
 
-// // 		batch := make([][]string, 0, 500)
+func bgReWriteAOF() {
+	log.Println("bgReWriteAOF start")
 
-// // 		for {
-// // 			select {
-// // 			case cmd := <-aofChan:
-// // 				batch = append(batch, cmd)
-// // 				if len(batch) >= 500 {
-// // 					flushAOFBatch(batch)
-// // 					batch = batch[:0]
-// // 				}
-// // 			case <-ticker.C:
-// // 				if len(batch) > 0 {
-// // 					flushAOFBatch(batch)
-// // 					batch = batch[:0]
-// // 				}
-// // 			}
-// // 		}
-// // 	}()
-// // }
+	temp := aofFileName + ".tmp"
+	f, err := os.Create(temp)
+	if err != nil {
+		log.Println("bgReWriteAOF create temp file error:", err)
+		return
+	}
+	w := bufio.NewWriter(f)
 
-// //	func flushAOFBatch(batch [][]string) {
-// //		go func() {
-// //			// 非阻塞刷盘：即使刷盘慢，也不影响主请求
-// //			tmpBuf := bytes.NewBuffer(nil)
-// //			for _, cmd := range batch {
-// //				arr := make(resp.Array, len(cmd))
-// //				for i, c := range cmd {
-// //					arr[i] = resp.BulkString(c)
-// //				}
-// //				tmpBuf.Write(arr.ToBytes())
-// //			}
-// //			aofMu.Lock()
-// //			defer aofMu.Unlock()
-// //			if _, err := aofWriter.Write(tmpBuf.Bytes()); err != nil {
-// //				log.Println("flushAOFBatch write error:", err)
-// //			}
-// //			if err := aofWriter.Flush(); err != nil {
-// //				log.Println("flushAOFBatch Flush error:", err)
-// //			}
-// //		}()
-// //	}
-// var aofFd int
-// var ring *iouring.IOURing
+	Store.SegScan(func(cmd []string) {
+		writeRespArray(w, cmd)
+	})
 
-// func initAOFIOUring(path string) error {
-// 	ring, err := iouring.New(1024)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	defer ring.Close()
+	w.Flush()
+	f.Sync()
+	f.Close()
 
-// 	aofFile, err := os.OpenFile("appendonly.aof", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-// 	if err != nil {
-// 		log.Fatalf("openAOF:%v", err)
-// 		return err
-// 	}
-// 	aofFd = int(aofFile.Fd())
+	os.Rename(temp, aofFileName)
+	log.Println("bgReWriteAOF done")
+}
 
-// 	go handleCompletionEvents()
+func loadAOF() error {
+	f, err := os.Open(aofFileName)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 
-// 	return nil
-// }
+	r := bufio.NewReader(f)
+	for {
+		raw, err := readFullRESP(r)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Printf("[AOF] readFullRESP error: %v", err)
+			continue
+		}
 
-// func handleCompletionEvents() {
-// 	resultCh := make(chan iouring.Result, 128)
+		val, _, err := resp.ParseRESP(append([]byte{}, raw...))
+		if err != nil {
+			log.Printf("[AOF] ParseRESP error: %v", err)
+			continue
+		}
+		HandleCommand(val, nil)
+	}
+	return nil
+}
 
-// 	for {
-// 		// 提交空请求触发完成事件检查
-// 		req := iouring.PrepWrite(aofFd, []byte{})
-// 		_, _ = ring.SubmitRequest(req, resultCh)
-
-// 		// 等待完成事件（超时时间可调整）
-// 		select {
-// 		case res := <-resultCh:
-// 			if res.Err != nil {
-// 				log.Printf("Completion error: %v", res.Err)
-// 			}
-// 		case <-time.After(100 * time.Millisecond):
-// 			// 定期检查避免阻塞
-// 		}
-// 	}
-// }
-
-// func submitAOFWrite(data []byte) error {
-// 	// 1. 构造写请求
-// 	req, err := iouring.PrepWrite(aofFd, data)
-// 	if err != nil {
-// 		return fmt.Errorf("create write request failed: %v", err)
-// 	}
-
-// 	// 2. 创建结果通道
-// 	resultCh := make(chan iouring.Result, 1)
-
-// 	// 3. 提交请求（需传入结果通道）
-// 	_, err = ring.SubmitRequest(req, resultCh)
-// 	if err != nil {
-// 		return fmt.Errorf("submit request failed: %v", err)
-// 	}
-
-// 	return nil
-// }
-
-// func waitAOFWriteCompletion() error {
-// 	cqes, err := ring.wait()
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	for _, cqe := range cqes {
-// 		if cqe.Res < 0 {
-// 			return syscall.Errno(-cqe.Res)
-// 		}
-// 	}
-// 	return nil
-// }
-
-// func cleanup() {
-// 	ring.Close()
-// }
+func writeRespArray(w *bufio.Writer, args []string) {
+	w.WriteByte('*')
+	w.WriteString(strconv.Itoa(len(args)))
+	w.WriteString("\r\n")
+	for _, s := range args {
+		w.WriteByte('$')
+		w.WriteString(strconv.Itoa(len(s)))
+		w.WriteString("\r\n")
+		w.WriteString(s)
+		w.WriteString("\r\n")
+	}
+}

@@ -72,10 +72,17 @@ func main() {
 		}()
 	}
 
-	// if err := initAOFIOUring("appendonly.aof"); err != nil {
-	// 	log.Fatalf("init AOF failed: %v", err)
-	// }
-	// defer cleanup()
+	//加载AOF
+	if err := initAOF(); err != nil {
+		log.Fatalf("load AOF failed: %v", err)
+	}
+	defer closeAOF()
+
+	go aofFsyncEverySec()
+
+	if err := loadAOF(); err != nil {
+		log.Fatalf("load AOF failed: %v", err)
+	}
 
 	//加载RDB
 	if err := loadRDB(); err != nil {

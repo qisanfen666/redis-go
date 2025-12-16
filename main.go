@@ -78,7 +78,7 @@ func main() {
 	}
 	defer closeAOF()
 
-	go aofFsyncEverySec()
+	enableAOF()
 
 	if err := loadAOF(); err != nil {
 		log.Fatalf("load AOF failed: %v", err)

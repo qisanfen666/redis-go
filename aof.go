@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"log"
 	"os"
@@ -67,18 +68,27 @@ func appendAOF(cmd []string) {
 
 }
 
-func aofFsyncEverySec() {
+func aofFsyncEverySec(ctx context.Context) {
 	if fsPolicy != "everysec" {
 		return
 	}
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
-	for range tick.C {
-		aofMu.Lock()
-		aofBuf.Flush()
-		aofFile.Sync()
-		aofMu.Unlock()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			aofMu.Lock()
+			if aofBuf != nil {
+				aofBuf.Flush()
+			}
+			if aofFile != nil {
+				aofFile.Sync()
+			}
+			aofMu.Unlock()
+		}
 	}
 }
 
@@ -146,5 +156,64 @@ func writeRespArray(w *bufio.Writer, args []string) {
 		w.WriteString("\r\n")
 		w.WriteString(s)
 		w.WriteString("\r\n")
+	}
+}
+
+var fsyncCancel func()
+
+func enableAOF() {
+	aofMu.Lock()
+	defer aofMu.Unlock()
+
+	f, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Println("enableAOF open file error:", err)
+		return
+	}
+	aofFile = f
+	aofBuf = bufio.NewWriter(f)
+	aofState = 1
+
+	if fsPolicy == "everysec" {
+		ctx, cancel := context.WithCancel(context.Background())
+		fsyncCancel = cancel
+		go aofFsyncEverySec(ctx)
+	}
+	log.Println("AOF enabled")
+}
+
+func disableAOF() {
+	aofMu.Lock()
+	defer aofMu.Unlock()
+
+	if aofState == 0 {
+		return
+	}
+
+	if fsyncCancel != nil {
+		fsyncCancel()
+		fsyncCancel = nil
+	}
+
+	aofBuf.Flush()
+	aofFile.Sync()
+	aofFile.Close()
+	aofState = 0
+	log.Println("AOF disabled")
+}
+
+func setFsyncPolicy(pol string) {
+	aofMu.Lock()
+	defer aofMu.Unlock()
+
+	fsPolicy = pol
+
+	if aofState == 1 && pol == "everysec" {
+		if fsyncCancel != nil {
+			fsyncCancel()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		fsyncCancel = cancel
+		go aofFsyncEverySec(ctx)
 	}
 }

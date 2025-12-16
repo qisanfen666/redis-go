@@ -10,7 +10,8 @@ import (
 // 最简配置表（key → 值）
 var configMap = map[string]resp.RespValue{
 	"save":             resp.Array{},
-	"appendonly":       resp.Array{resp.BulkString("no")},
+	"appendonly":       resp.Array{resp.BulkString("yes")},
+	"appendfsync":      resp.Array{resp.BulkString("everysec")},
 	"maxmemory":        resp.Array{resp.BulkString("0")},
 	"maxmemory-policy": resp.Array{resp.BulkString("allkeys-lru")},
 }
@@ -60,6 +61,35 @@ func configSet(arr resp.Array) resp.RespValue {
 			configMap[key] = resp.Array{resp.BulkString(pol)}
 		default:
 			return resp.Error("ERR unsupported maxmemory-policy")
+		}
+	case "appendonly":
+		bs, ok := val.(resp.BulkString)
+		if !ok {
+			return resp.Error("ERR appendonly must be 'yes' or 'no'")
+		}
+		pol := strings.ToLower(string(bs))
+		switch pol {
+		case "yes":
+			enableAOF()
+			configMap[key] = resp.Array{resp.BulkString("yes")}
+		case "no":
+			disableAOF()
+			configMap[key] = resp.Array{resp.BulkString("no")}
+		default:
+			return resp.Error("ERR appendonly must be 'yes' or 'no'")
+		}
+	case "appendfsync":
+		bs, ok := val.(resp.BulkString)
+		if !ok {
+			return resp.Error("ERR appendfsync must be a string")
+		}
+		pol := strings.ToLower(string(bs))
+		switch pol {
+		case "always", "everysec", "no":
+			setFsyncPolicy(pol)
+			configMap[key] = resp.Array{resp.BulkString(pol)}
+		default:
+			return resp.Error("ERR unsupported appendfsync policy")
 		}
 	default:
 		configMap[key] = resp.Array{val}

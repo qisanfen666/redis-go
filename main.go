@@ -50,7 +50,7 @@ var raftNode *raft.RaftNode
 
 var (
 	redisAddr = flag.String("redis", ":6380", "redis listen addr")
-	pprofAddr = flag.String("pprof", ":0", "pprof addr,:0=disable")
+	pprofAddr = flag.String("pprof", ":6060", "pprof addr,:0=disable")
 )
 
 func main() {
@@ -203,6 +203,28 @@ func (cc *clientConn) handleOne(val resp.RespValue) resp.RespValue {
 		return HandleCommand(val, cc)
 	})
 }
+
+// func readPipeline(r *bufio.Reader, dst *[][]byte) error {
+// 	// 尽量把内核缓冲区读空
+// 	if r.Buffered() == 0 {
+// 		if _, err := r.Peek(1); err != nil {
+// 			return err
+// 		}
+// 	}
+// 	buf := r.Peek(r.Buffered())
+// 	off := 0
+// 	for off < len(buf) {
+// 		// 快速找完整 RESP 包
+// 		req, remaining, err := resp.FastParse(buf[off:]) // 见下
+// 		if err != nil {                                  // 包不完整
+// 			break
+// 		}
+// 		*dst = append(*dst, buf[off:off+len(req)-len(remaining)])
+// 		off += len(req) - len(remaining)
+// 	}
+// 	_, _ = r.Discard(off) // 整体滑动窗口，无内存拷贝
+// 	return nil
+// }
 
 func readFullRESP(r *bufio.Reader) ([]byte, error) {
 	var buf []byte

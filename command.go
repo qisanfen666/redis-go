@@ -9,6 +9,7 @@ import (
 	"redis-go/zset"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
@@ -20,13 +21,20 @@ func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
 	if !ok {
 		return resp.Error("ERR unknow command")
 	}
+	start := time.Now()
+	var hit bool
+	defer func() {
+		recordCmd(strings.ToUpper(string(cmd)), time.Since(start), hit)
+	}()
 	switch strings.ToUpper(string(cmd)) {
 	case "PING":
 		return ping(arr)
 	case "SET":
 		return set(arr)
 	case "GET":
-		return get(arr)
+		val, ok := get(arr)
+		hit = ok
+		return val
 	case "DEL":
 		return del(arr)
 	case "EXPIRE":
@@ -127,20 +135,20 @@ func set(arr resp.Array) resp.RespValue {
 	return resp.SimpleString("OK")
 }
 
-func get(arr resp.Array) resp.RespValue {
+func get(arr resp.Array) (resp.RespValue, bool) {
 	if len(arr) != 2 {
-		return resp.Error("ERR wrong command")
+		return resp.Error("ERR wrong command"), false
 	}
 	key := string(arr[1].(resp.BulkString))
 	if ttl.IsExpired(key) {
-		return resp.Null{}
+		return resp.Null{}, false
 	}
 	val, ok := Store.Get(key)
 	if !ok {
-		return resp.Null{}
+		return resp.Null{}, false
 	}
 	evict.Touch(key)
-	return resp.BulkString(val)
+	return resp.BulkString(val), true
 }
 
 func del(arr resp.Array) resp.RespValue {

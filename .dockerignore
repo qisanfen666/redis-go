@@ -1,0 +1,7 @@
+.git
+*.md
+*.txt
+*.aof
+*.sh
+*.gitignore
+Dockerfile

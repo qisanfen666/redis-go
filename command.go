@@ -9,10 +9,9 @@ import (
 	"redis-go/zset"
 	"strconv"
 	"strings"
-	"time"
 )
 
-func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
+func HandleCommand(v resp.RespValue) resp.RespValue {
 	arr, ok := v.(resp.Array)
 	if !ok || len(arr) == 0 {
 		return resp.Error("ERR unknow command")
@@ -21,20 +20,13 @@ func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
 	if !ok {
 		return resp.Error("ERR unknow command")
 	}
-	start := time.Now()
-	var hit bool
-	defer func() {
-		recordCmd(strings.ToUpper(string(cmd)), time.Since(start), hit)
-	}()
 	switch strings.ToUpper(string(cmd)) {
 	case "PING":
 		return ping(arr)
 	case "SET":
 		return set(arr)
 	case "GET":
-		val, ok := get(arr)
-		hit = ok
-		return val
+		return get(arr)
 	case "DEL":
 		return del(arr)
 	case "EXPIRE":
@@ -59,25 +51,25 @@ func HandleCommand(v resp.RespValue, cc *clientConn) resp.RespValue {
 		return rpop(arr)
 	case "LRANGE":
 		return lrange(arr)
-	case "MULTI":
-		return cc.tx.multi()
-	case "DISCARD":
-		return cc.tx.discard()
-	case "EXEC":
-		return cc.tx.exec()
-	case "PUBLISH":
-		return publish(arr)
-	case "SUBSCRIBE":
-		return subscribe(arr, cc)
-	case "UNSUBSCRIBE":
-		return unsubscribe(arr, cc)
+	// case "MULTI":
+	// 	return cc.tx.multi()
+	// case "DISCARD":
+	// 	return cc.tx.discard()
+	// case "EXEC":
+	// 	return cc.tx.exec()
+	// case "PUBLISH":
+	// 	return publish(arr)
+	// case "SUBSCRIBE":
+	// 	return subscribe(arr, cc)
+	// case "UNSUBSCRIBE":
+	// 	return unsubscribe(arr, cc)
 	case "CONFIG":
 		return config(arr)
-	case "BGREWRITEAOF":
-		bgReWriteAOF()
-		return resp.SimpleString("Background AOF rewrite started")
-	case "BGSAVE":
-		return bgsave()
+	// case "BGREWRITEAOF":
+	// 	bgReWriteAOF()
+	// 	return resp.SimpleString("Background AOF rewrite started")
+	// case "BGSAVE":
+	// 	return bgsave()
 	case "INFO":
 		return info(arr)
 	default:
@@ -115,8 +107,8 @@ func set(arr resp.Array) resp.RespValue {
 			return resp.Error("ERR unknown option")
 		}
 	}
-	appendAOF([]string{"SET", key, value})
-	Store.Add(key, value)
+	//appendAOF([]string{"SET", key, value})
+	Store.Set(key, value)
 
 	evict.UpdateMemoryUsage(evict.EstimateMemoryUsage(key, value))
 	evict.Touch(key)
@@ -128,27 +120,23 @@ func set(arr resp.Array) resp.RespValue {
 		ttl.DelTTL(key)
 	}
 
-	if raftNode != nil && raftNode.IsLeader() {
-		raftNode.Propose("SET" + " " + key + " " + value)
-	}
-
 	return resp.SimpleString("OK")
 }
 
-func get(arr resp.Array) (resp.RespValue, bool) {
+func get(arr resp.Array) resp.RespValue {
 	if len(arr) != 2 {
-		return resp.Error("ERR wrong command"), false
+		return resp.Error("ERR wrong command")
 	}
 	key := string(arr[1].(resp.BulkString))
 	if ttl.IsExpired(key) {
-		return resp.Null{}, false
+		return resp.Null{}
 	}
 	val, ok := Store.Get(key)
 	if !ok {
-		return resp.Null{}, false
+		return resp.Null{}
 	}
 	evict.Touch(key)
-	return resp.BulkString(val), true
+	return resp.BulkString(val)
 }
 
 func del(arr resp.Array) resp.RespValue {
@@ -157,7 +145,7 @@ func del(arr resp.Array) resp.RespValue {
 		key := string(arr[i].(resp.BulkString))
 		if _, exist := Store.Get(key); exist {
 			Store.Delete(key)
-			appendAOF([]string{"DEL", key})
+			//appendAOF([]string{"DEL", key})
 			deleted++
 		}
 	}
@@ -391,59 +379,59 @@ func lrange(arr resp.Array) resp.RespValue {
 	return out
 }
 
-func publish(arr resp.Array) resp.RespValue {
-	if len(arr) != 3 {
-		return resp.Error("ERR syntax error")
-	}
+// func publish(arr resp.Array) resp.RespValue {
+// 	if len(arr) != 3 {
+// 		return resp.Error("ERR syntax error")
+// 	}
 
-	channel := string(arr[1].(resp.BulkString))
-	message := string(arr[2].(resp.BulkString))
-	n := psHub.publish(channel, message)
+// 	channel := string(arr[1].(resp.BulkString))
+// 	message := string(arr[2].(resp.BulkString))
+// 	n := psHub.publish(channel, message)
 
-	return resp.Integer(int64(n))
-}
+// 	return resp.Integer(int64(n))
+// }
 
-func subscribe(arr resp.Array, cc *clientConn) resp.RespValue {
-	if len(arr) < 2 {
-		return resp.Error("ERR syntax error")
-	}
+// func subscribe(arr resp.Array, cc *clientConn) resp.RespValue {
+// 	if len(arr) < 2 {
+// 		return resp.Error("ERR syntax error")
+// 	}
 
-	var channel string
-	out := resp.Array{}
+// 	var channel string
+// 	out := resp.Array{}
 
-	for i := 1; i < len(arr); i++ {
-		channel = string(arr[i].(resp.BulkString))
-		count := psHub.subscribe(channel, cc)
-		out = append(out,
-			resp.BulkString("subscribe"),
-			resp.BulkString(channel),
-			resp.Integer(count),
-		)
-	}
+// 	for i := 1; i < len(arr); i++ {
+// 		channel = string(arr[i].(resp.BulkString))
+// 		count := psHub.subscribe(channel, cc)
+// 		out = append(out,
+// 			resp.BulkString("subscribe"),
+// 			resp.BulkString(channel),
+// 			resp.Integer(count),
+// 		)
+// 	}
 
-	return out
-}
+// 	return out
+// }
 
-func unsubscribe(arr resp.Array, cc *clientConn) resp.RespValue {
-	if len(arr) < 2 {
-		return resp.Error("ERR syntax error")
-	}
+// func unsubscribe(arr resp.Array, cc *clientConn) resp.RespValue {
+// 	if len(arr) < 2 {
+// 		return resp.Error("ERR syntax error")
+// 	}
 
-	var channel string
-	out := resp.Array{}
+// 	var channel string
+// 	out := resp.Array{}
 
-	for i := 1; i < len(arr); i++ {
-		channel = string(arr[i].(resp.BulkString))
-		count := psHub.unsubscribe(channel, cc)
-		out = append(out,
-			resp.BulkString("unsubscribe"),
-			resp.BulkString(channel),
-			resp.Integer(count),
-		)
-	}
+// 	for i := 1; i < len(arr); i++ {
+// 		channel = string(arr[i].(resp.BulkString))
+// 		count := psHub.unsubscribe(channel, cc)
+// 		out = append(out,
+// 			resp.BulkString("unsubscribe"),
+// 			resp.BulkString(channel),
+// 			resp.Integer(count),
+// 		)
+// 	}
 
-	return out
-}
+// 	return out
+// }
 
 func config(arr resp.Array) resp.RespValue {
 	switch strings.ToUpper(string(arr[1].(resp.BulkString))) {

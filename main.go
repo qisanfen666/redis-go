@@ -3,25 +3,25 @@ package main
 import (
 	"bufio"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
-	"os"
-	"redis-go/raft"
 	"redis-go/resp"
 	"redis-go/store"
-	"strings"
 	"sync"
 	"time"
 )
 
-var Store = store.Store
+var (
+	Store       = store.Store
+	redisAddr   = flag.String("addr", ":6380", "redis server address")
+	pprofAddr   = flag.String("pprof", ":6060", "pprof address")
+	maxPipeline = 256
+)
 
-type clientConn struct {
+type Client struct {
 	conn net.Conn
-	tx   *ClientTx
 	r    *bufio.Reader
 	w    *bufio.Writer
 	mu   sync.RWMutex
@@ -32,81 +32,98 @@ var respArrayPool = sync.Pool{
 		return &resp.Array{}
 	},
 }
-var bufioReaderPool = sync.Pool{
+var readerPool = sync.Pool{
 	New: func() interface{} {
 		return bufio.NewReaderSize(nil, 16*1024)
 	},
 }
-var bufioWriterPool = sync.Pool{
+var writerPool = sync.Pool{
 	New: func() interface{} {
 		return bufio.NewWriterSize(nil, 16*1024)
 	},
 }
-var maxPipeline = 256
-
-//var addrs = []string{"127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"}
-
-var raftNode *raft.RaftNode
-
-var (
-	redisAddr = flag.String("redis", ":6380", "redis listen addr")
-	pprofAddr = flag.String("pprof", ":6060", "pprof addr,:0=disable")
-)
 
 func main() {
-
-	//raft
-	id := flag.Int("id", 1, "node ID")
-	addr := flag.String("addr", ":7001", "listen addr")
-	peers := flag.String("peers", "", "comma separated list of peers")
 	flag.Parse()
-	var peerList []string
-	if *peers != "" {
-		peerList = strings.Split(*peers, ",")
-	}
-	raftNode = raft.NewRaftNode(*id, *addr, peerList)
 
-	if *pprofAddr != ":0" {
+	//性能分析server
+	if *pprofAddr != "" {
 		go func() {
-			log.Println(http.ListenAndServe(*pprofAddr, nil))
+			log.Printf("pprof server started on %s", *pprofAddr)
+			http.ListenAndServe(*pprofAddr, nil)
 		}()
 	}
 
+	//加载持久化
+	if err := loadPersistence(); err != nil {
+		log.Printf("WARN: load persistence failed: %v", err)
+	}
+
+	//启动服务
+	startServer()
+
 	//加载AOF
-	if err := initAOF(); err != nil {
-		log.Fatalf("load AOF failed: %v", err)
-	}
-	defer closeAOF()
+	// if err := initAOF(); err != nil {
+	// 	log.Fatalf("load AOF failed: %v", err)
+	// }
 
-	enableAOF()
+	// defer closeAOF()
 
-	if err := loadAOF(); err != nil {
-		log.Fatalf("load AOF failed: %v", err)
-	}
+	// enableAOF()
 
-	//加载RDB
-	if err := loadRDB(); err != nil {
-		log.Fatalf("load RDB failed: %v", err)
-	}
-	if len(os.Args) > 1 && os.Args[1] == "bgsave" {
-		if err := doSave(); err != nil {
-			log.Fatalf("BGSAVE failed: %v", err)
-		}
-		log.Println("BGSAVE completed")
-		return
-	}
+	// if err := loadAOF(); err != nil {
+	// 	log.Fatalf("load AOF failed: %v", err)
+	// }
 
-	lis, err := net.Listen("tcp", *redisAddr)
+	// //加载RDB
+	// if err := loadRDB(); err != nil {
+	// 	log.Fatalf("load RDB failed: %v", err)
+	// }
+	// if len(os.Args) > 1 && os.Args[1] == "bgsave" {
+	// 	if err := doSave(); err != nil {
+	// 		log.Fatalf("BGSAVE failed: %v", err)
+	// 	}
+	// 	log.Println("BGSAVE completed")
+	// 	return
+	// }
 
+	//启动服务器实例
+	// lis, err := net.Listen("tcp", *redisAddr)
+
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	// fmt.Println("redis-go start")
+
+	// for {
+	// 	conn, err := lis.Accept()
+	// 	if err != nil {
+	// 		continue
+	// 	}
+	// 	go handleConn(conn)
+	// }
+}
+
+func loadPersistence() error {
+	//加载aof
+	//加载rdb
+	return nil
+}
+
+func startServer() {
+	ln, err := net.Listen("tcp", *redisAddr)
 	if err != nil {
-		panic(err)
+		log.Printf("listen failed: %v", err)
 	}
+	defer ln.Close()
 
-	fmt.Println("redis-go start")
+	log.Printf("redis server started on %s", *redisAddr)
 
 	for {
-		conn, err := lis.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
+			log.Printf("accept failed: %v", err)
 			continue
 		}
 		go handleConn(conn)
@@ -114,117 +131,54 @@ func main() {
 }
 
 func handleConn(conn net.Conn) {
-	r := bufioReaderPool.Get().(*bufio.Reader)
+	defer conn.Close()
+
+	//从pool里获取reader/writer
+	r := readerPool.Get().(*bufio.Reader)
 	r.Reset(conn)
 	defer func() {
-		bufioReaderPool.Put(r)
+		readerPool.Put(r)
 	}()
-	w := bufioWriterPool.Get().(*bufio.Writer)
+
+	w := writerPool.Get().(*bufio.Writer)
 	w.Reset(conn)
 	defer func() {
-		bufioWriterPool.Put(w)
+		w.Flush()
+		writerPool.Put(w)
 	}()
 
-	cc := &clientConn{
-		conn: conn,
-		tx:   NewClientTx(),
-		r:    r,
-		w:    w,
+	//设置连接属性
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-
-	defer cc.Close()
-
-	//设置超时
-	netConn, ok := cc.conn.(interface {
-		SetReadDeadline(t time.Time) error
-	})
-	hasDeadline := ok
 
 	for {
-		var responses []resp.RespValue
+		var batch [][]byte
+		conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 
-		//读取第一条命令
-		raw, err := readFullRESP(cc.r)
-		if err != nil {
-			return
-		}
-
-		//处理第一条命令
-		val, _, err := resp.ParseRESP(append([]byte{}, raw...))
-		if err != nil {
-			cc.w.Write(resp.Error("ERR invalid command").ToBytes())
-			cc.w.Flush()
-			continue
-		}
-		responses = append(responses, cc.handleOne(val))
-
-		if hasDeadline {
-			netConn.SetReadDeadline(time.Now().Add(10 * time.Microsecond))
-
-			for i := 1; i < maxPipeline; i++ {
-				raw, err := readFullRESP(cc.r)
-				if err != nil {
-					break
-				}
-				val, _, err := resp.ParseRESP(append([]byte{}, raw...))
-				if err != nil {
-					cc.w.Write(resp.Error("ERR invalid command").ToBytes())
-					cc.w.Flush()
-					continue
-				}
-				responses = append(responses, cc.handleOne(val))
+		for i := 0; i < maxPipeline; i++ {
+			cmd, err := readFullRESP(r)
+			if err != nil {
+				return
 			}
-
-			netConn.SetReadDeadline(time.Time{})
+			batch = append(batch, cmd)
 		}
+		conn.SetReadDeadline(time.Time{})
 
-		for _, response := range responses {
-			cc.w.Write(response.ToBytes())
+		for _, cmd := range batch {
+			val, _, err := resp.ParseRESP(cmd)
+			if err != nil {
+				errResp := resp.Error("ERR protocol error")
+				w.Write(errResp.ToBytes())
+				continue
+			}
+			resp := HandleCommand(val)
+			w.Write(resp.ToBytes())
 		}
-		cc.w.Flush()
+		w.Flush()
 	}
 }
-
-func (cc *clientConn) handleOne(val resp.RespValue) resp.RespValue {
-	arr, ok := val.(resp.Array)
-	if !ok || len(arr) == 0 {
-		return resp.Error("ERR unknow command")
-	}
-	cmd, ok := arr[0].(resp.BulkString)
-	if !ok {
-		return resp.Error("ERR unknow command")
-	}
-
-	switch strings.ToUpper(string(cmd)) {
-	case "MULTI", "EXEC", "DISCARD":
-		return HandleCommand(val, cc)
-	}
-	return cc.tx.enqueue(func() resp.RespValue {
-		return HandleCommand(val, cc)
-	})
-}
-
-// func readPipeline(r *bufio.Reader, dst *[][]byte) error {
-// 	// 尽量把内核缓冲区读空
-// 	if r.Buffered() == 0 {
-// 		if _, err := r.Peek(1); err != nil {
-// 			return err
-// 		}
-// 	}
-// 	buf := r.Peek(r.Buffered())
-// 	off := 0
-// 	for off < len(buf) {
-// 		// 快速找完整 RESP 包
-// 		req, remaining, err := resp.FastParse(buf[off:]) // 见下
-// 		if err != nil {                                  // 包不完整
-// 			break
-// 		}
-// 		*dst = append(*dst, buf[off:off+len(req)-len(remaining)])
-// 		off += len(req) - len(remaining)
-// 	}
-// 	_, _ = r.Discard(off) // 整体滑动窗口，无内存拷贝
-// 	return nil
-// }
 
 func readFullRESP(r *bufio.Reader) ([]byte, error) {
 	var buf []byte
@@ -244,9 +198,4 @@ func readFullRESP(r *bufio.Reader) ([]byte, error) {
 			respArrayPool.Put(arr)
 		}
 	}
-}
-
-func (cc *clientConn) Close() {
-	psHub.removeAllSubscriptions(cc)
-	cc.conn.Close()
 }

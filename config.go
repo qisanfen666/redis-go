@@ -70,10 +70,10 @@ func configSet(arr resp.Array) resp.RespValue {
 		pol := strings.ToLower(string(bs))
 		switch pol {
 		case "yes":
-			enableAOF()
+			//enableAOF()
 			configMap[key] = resp.Array{resp.BulkString("yes")}
 		case "no":
-			disableAOF()
+			//disableAOF()
 			configMap[key] = resp.Array{resp.BulkString("no")}
 		default:
 			return resp.Error("ERR appendonly must be 'yes' or 'no'")
@@ -86,7 +86,7 @@ func configSet(arr resp.Array) resp.RespValue {
 		pol := strings.ToLower(string(bs))
 		switch pol {
 		case "always", "everysec", "no":
-			setFsyncPolicy(pol)
+			//setFsyncPolicy(pol)
 			configMap[key] = resp.Array{resp.BulkString(pol)}
 		default:
 			return resp.Error("ERR unsupported appendfsync policy")

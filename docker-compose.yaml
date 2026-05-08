@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  redis-go:
+    build: . 
+    image: redis-go:latest
+    container_name: redis-go
+    ports:
+      - "6380:6380"
+      - "6060:6060"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL","timeout 5 bash -c 'echo PING | nc loaclhost 6380' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

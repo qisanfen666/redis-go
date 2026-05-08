@@ -1,314 +1,365 @@
 package store
 
 import (
-	"log"
+	"fmt"
 	"redis-go/hash"
 	"redis-go/list"
 	"redis-go/zset"
+	"sync"
 	"sync/atomic"
-	"unsafe"
 )
 
 var Store = NewSegDict()
 
-// const segmentShift = 5  32段
-const segmentMask = 31
-
-type dictEntry struct {
-	key  string
-	val  string
-	next *dictEntry
-}
-
-type segBucket struct {
-	head unsafe.Pointer // *dictEntry
-}
-
-type Segment struct {
-	rehashIdx int64
-	used      int64
-	ht        [2]unsafe.Pointer // *segTable
-}
-
-type segTable struct {
-	size    int
-	mask    int
-	buckets []*segBucket
-}
-
-type SegDict struct {
+type SegmentDict struct {
 	segments [32]*Segment
 	Zsets    map[string]*(zset.Zset)
 	Lists    map[string]*(list.List)
+	zm       sync.RWMutex
 }
 
-func NewSegDict() *SegDict {
-	d := &SegDict{
+type Segment struct {
+	mu     sync.RWMutex
+	table0 *HashTable
+	table1 *HashTable
+
+	rehashing bool
+	rehashIdx int64
+}
+
+type HashTable struct {
+	size    int64
+	mask    int64
+	buckets []*Bucket
+}
+
+type Bucket struct {
+	head *Entry
+}
+
+type Entry struct {
+	key  string
+	val  string
+	next *Entry
+}
+
+func NewSegDict() *SegmentDict {
+	d := &SegmentDict{
 		Zsets: make(map[string]*(zset.Zset)),
 		Lists: make(map[string]*(list.List)),
 	}
 
 	for i := 0; i < 32; i++ {
-		seg := &Segment{
-			rehashIdx: -1,
+		d.segments[i] = &Segment{
+			table0: NewHashTable(4),
 		}
-
-		seg.ht[0] = unsafe.Pointer(&segTable{
-			size:    4,
-			mask:    3,
-			buckets: make([]*segBucket, 4),
-		})
-
-		for j := 0; j < 4; j++ {
-			(*segTable)(seg.ht[0]).buckets[j] = &segBucket{}
-		}
-
-		seg.ht[1] = nil
-
-		d.segments[i] = seg
 	}
 
 	return d
 }
 
-func (s *SegDict) Add(key, val string) {
-	h := hash.Murmur3Hash(key)
-	seg := s.segments[h&segmentMask]
-
-	idx := h & uint32((*segTable)(seg.ht[0]).mask)
-	bucket := (*segTable)(seg.ht[0]).buckets[idx]
-	oldHead := (*dictEntry)(atomic.LoadPointer(&bucket.head))
-
-	//新节点指向链表头
-	newEntry := &dictEntry{
-		key:  key,
-		val:  val,
-		next: oldHead,
+func NewHashTable(size int64) *HashTable {
+	if size <= 0 {
+		size = 4
 	}
 
-	atomic.StorePointer(&bucket.head, unsafe.Pointer(newEntry))
-	atomic.AddInt64(&seg.used, 1)
-
-	//是否检查负载因子
-	if float64(seg.used)/float64((*segTable)(seg.ht[0]).size) >= 1.0 {
-		seg.triggerRehash()
+	ht := &HashTable{
+		size:    size,
+		mask:    size - 1,
+		buckets: make([]*Bucket, size),
 	}
 
-	seg.segRehash()
+	for i := int64(0); i < size; i++ {
+		ht.buckets[i] = &Bucket{}
+	}
+
+	return ht
 }
 
-func (s *SegDict) Get(key string) (string, bool) {
+func (sd *SegmentDict) getSegment(key string) *Segment {
 	h := hash.Murmur3Hash(key)
-	seg := s.segments[h&segmentMask]
+	segmentIdx := h & 31
+	return sd.segments[segmentIdx]
+}
 
-	idx0 := h & uint32((*segTable)(seg.ht[0]).mask)
-	bucket0 := (*segTable)(seg.ht[0]).buckets[idx0]
+func (sd *SegmentDict) Set(key, val string) {
+	seg := sd.getSegment(key)
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
 
-	head1 := (*dictEntry)(atomic.LoadPointer(&bucket0.head))
-	if head1 != nil {
-		entry := (*dictEntry)(head1)
-		for entry != nil {
-			if entry.key == key {
-				return entry.val, true
-			}
-			entry = entry.next
+	seg.tryRehash(1)
+
+	h := hash.Murmur3Hash(key)
+
+	var targetTable *HashTable
+	var targetIdx int64
+
+	if seg.rehashing {
+		targetTable = seg.table1
+		targetIdx = int64(h) & seg.table1.mask
+
+		oldIdx := int64(h) & seg.table0.mask
+		seg.table0.remove(key, oldIdx)
+	} else {
+		targetTable = seg.table0
+		targetIdx = int64(h) & seg.table0.mask
+	}
+
+	bucket := targetTable.buckets[targetIdx]
+
+	//遍历bucket
+	entry := bucket.head
+
+	for entry != nil {
+		if entry.key == key {
+			entry.val = val
+			return
+		}
+		entry = entry.next
+	}
+
+	newEntry := &Entry{
+		key:  key,
+		val:  val,
+		next: bucket.head,
+	}
+	bucket.head = newEntry
+
+	//更新计数
+	if targetTable == seg.table0 {
+		atomic.AddInt64(&seg.table0.size, 1)
+	}
+
+	//检查是否开始rehash
+	if !seg.rehashing && seg.shouldStartRehash() {
+		seg.startRehash()
+	}
+}
+
+func (sd *SegmentDict) Get(key string) (string, bool) {
+	seg := sd.getSegment(key)
+	seg.mu.RLock()
+	defer seg.mu.RUnlock()
+
+	h := hash.Murmur3Hash(key)
+
+	if seg.rehashing {
+		if val, found := seg.table0.get(key, int64(h)&seg.table0.mask); found {
+			return val, true
+		}
+
+		return seg.table1.get(key, int64(h)&seg.table1.mask)
+	}
+
+	return seg.table0.get(key, int64(h)&seg.table0.mask)
+}
+
+func (sd *SegmentDict) Delete(key string) bool {
+	seg := sd.getSegment(key)
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+
+	seg.tryRehash(1)
+
+	h := hash.Murmur3Hash(key)
+	deleted := false
+
+	//从table0里删除
+	idx0 := int64(h) & seg.table0.mask
+	if seg.table0.remove(key, idx0) {
+		deleted = true
+	}
+
+	if seg.rehashing {
+		idx1 := int64(h) & seg.table1.mask
+		if seg.table1.remove(key, idx1) {
+			deleted = true
 		}
 	}
 
-	if seg.ht[1] != nil {
-		idx1 := h & uint32((*segTable)(seg.ht[1]).mask)
-		bucket1 := (*segTable)(seg.ht[1]).buckets[idx1]
-		head2 := atomic.LoadPointer(&bucket1.head)
-		if head2 != nil {
-			entry := (*dictEntry)(head2)
+	return deleted
+}
+
+func (s *Segment) shouldStartRehash() bool {
+	loadFactor := float64(atomic.LoadInt64(&s.table0.size)) / float64(s.table0.size)
+	return loadFactor > 1.0
+}
+
+func (s *Segment) startRehash() {
+	if s.rehashing {
+		return
+	}
+
+	newSize := s.table0.size * 2
+	if newSize <= 0 {
+		newSize = 8
+	}
+
+	s.table1 = NewHashTable(newSize)
+	s.rehashing = true
+	s.rehashIdx = 0
+}
+
+func (s *Segment) tryRehash(n int) {
+	if !s.rehashing {
+		return
+	}
+
+	for i := 0; i < n && s.rehashIdx < s.table0.size; i++ {
+		//迁移一个桶
+		bucket := s.table0.buckets[s.rehashIdx]
+		if bucket.head != nil {
+			entry := bucket.head
 			for entry != nil {
-				if entry.key == key {
-					return entry.val, true
+				newIdx := hash.Murmur3Hash(entry.key) & uint32(s.table1.mask)
+				newBucket := s.table1.buckets[newIdx]
+
+				newEntry := &Entry{
+					key:  entry.key,
+					val:  entry.val,
+					next: newBucket.head,
 				}
+				newBucket.head = newEntry
+
 				entry = entry.next
 			}
+
+			bucket.head = nil
 		}
+
+		s.rehashIdx++
+	}
+
+	if s.rehashIdx >= s.table0.size {
+		s.table0 = s.table1
+		s.table1 = nil
+		s.rehashing = false
+		s.rehashIdx = 0
+	}
+}
+
+func (ht *HashTable) get(key string, idx int64) (string, bool) {
+	bucket := ht.buckets[idx]
+	entry := bucket.head
+
+	for entry != nil {
+		if entry.key == key {
+			return entry.val, true
+		}
+		entry = entry.next
 	}
 
 	return "", false
 }
 
-func (s *SegDict) Delete(key string) bool {
-	h := hash.Murmur3Hash(key)
-	seg := s.segments[h&segmentMask]
-
-	seg.segRehash()
-
-	idx0 := h & uint32((*segTable)(seg.ht[0]).mask)
-	bucket0 := (*segTable)(seg.ht[0]).buckets[idx0]
-
-	var prev *dictEntry
-	var newHead *dictEntry
-
-	oldHead := (*dictEntry)(atomic.LoadPointer(&bucket0.head))
-	entry := oldHead
-	for entry != nil {
-		if entry.key == key {
-			if prev == nil {
-				newHead = entry.next
-			} else {
-				prev.next = entry.next
-			}
-			atomic.StorePointer(&bucket0.head, unsafe.Pointer(newHead))
-			atomic.AddInt64(&seg.used, -1)
-			return true
-		}
-		prev = entry
-		entry = entry.next
+func (ht *HashTable) remove(key string, idx int64) bool {
+	bucket := ht.buckets[idx]
+	if bucket.head == nil {
+		return false
 	}
 
-	if seg.ht[1] != nil {
-		idx1 := h & uint32((*segTable)(seg.ht[1]).mask)
-		bucket1 := (*segTable)(seg.ht[1]).buckets[idx1]
+	if bucket.head.key == key {
+		bucket.head = bucket.head.next
+		atomic.AddInt64(&ht.size, -1)
+		return true
+	}
 
-		prev = nil
-		newHead = nil
+	prev := bucket.head
+	cur := prev.next
 
-		oldHead1 := (*dictEntry)(atomic.LoadPointer(&bucket1.head))
-		entry1 := oldHead1
-		for entry1 != nil {
-			if entry1.key == key {
-				if prev == nil {
-					newHead = entry1.next
-				} else {
-					prev.next = entry1.next
-				}
-				atomic.StorePointer(&bucket1.head, unsafe.Pointer(newHead))
-				atomic.AddInt64(&seg.used, -1)
-				return true
-			}
-			prev = entry1
-			entry1 = entry1.next
+	for cur != nil {
+		if cur.key == key {
+			prev.next = cur.next
+			atomic.AddInt64(&ht.size, -1)
+			return true
 		}
+		prev = cur
+		cur = cur.next
 	}
 
 	return false
 }
 
-func (s *SegDict) SegScan(fn func(cmd []string)) {
-	// 遍历所有 segments
-	for _, seg := range s.segments {
-		// 遍历两个哈希表
-		for tableIdx := 0; tableIdx <= 1; tableIdx++ {
-			table := seg.ht[tableIdx]
-			if table == nil {
-				continue
+func (sd *SegmentDict) Scan(fn func(key, value string)) {
+	for _, seg := range sd.segments {
+		seg.mu.RLock()
+
+		for _, bucket := range seg.table0.buckets {
+			entry := bucket.head
+			for entry != nil {
+				fn(entry.key, entry.val)
+				entry = entry.next
 			}
-			// 遍历所有桶
-			for _, bucket := range (*segTable)(table).buckets {
-				entry := (*dictEntry)(atomic.LoadPointer(&bucket.head))
-				// 遍历链表中的所有节点
+		}
+
+		if seg.rehashing {
+			for _, bucket := range seg.table1.buckets {
+				entry := bucket.head
 				for entry != nil {
-					fn([]string{"SET", entry.key, entry.val})
+					fn(entry.key, entry.val)
 					entry = entry.next
 				}
 			}
 		}
+
+		seg.mu.RUnlock()
 	}
 }
 
-// func (s *Segment) shouldRehash() bool {
-// 	if s.ht[0] == nil || s.rehashIdx != -1 {
-// 		return false
-// 	}
+func (sd *SegmentDict) Stats() map[string]interface{} {
+	stats := make(map[string]interface{})
+	totalEntries := 0
+	rehashingSegments := 0
 
-// 	if atomic.CompareAndSwapInt64(&s.rehashIdx, -1, 0) {
-// 		newSize := (*segTable)(s.ht[0]).size * 2
-// 		newTable := unsafe.Pointer(&segTable{
-// 			size:    newSize,
-// 			mask:    newSize - 1,
-// 			buckets: make([]*segBucket, newSize),
-// 		})
-// 		for i := 0; i < newSize; i++ {
-// 			(*segTable)(newTable).buckets[i] = &segBucket{head: nil}
-// 		}
-// 		s.ht[1] = newTable
-// 		s.rehashIdx = 0
-// 		return true
-// 	}
+	for i, seg := range sd.segments {
+		seg.mu.RLock()
+		segmentStats := make(map[string]interface{})
+		segmentStats["table0_size"] = seg.table0.size
+		segmentStats["table0_buckets"] = len(seg.table0.buckets)
 
-// 	return false
-// }
-
-func (s *Segment) triggerRehash() {
-	// 仅当未rehash时触发（原子操作避免并发冲突）
-	if atomic.CompareAndSwapInt64(&s.rehashIdx, -1, 0) {
-		oldSize := (*segTable)(s.ht[0]).size
-		newSize := oldSize * 2
-		if newSize <= 0 {
-			atomic.StoreInt64(&s.rehashIdx, -1) // 初始化失败，重置状态
-			return
-		}
-
-		// 创建新表（初始化每个桶的head为nil）
-		newTable := unsafe.Pointer(&segTable{
-			size:    newSize,
-			mask:    newSize - 1,
-			buckets: make([]*segBucket, newSize),
-		})
-		for i := range (*segTable)(newTable).buckets {
-			(*segTable)(newTable).buckets[i] = &segBucket{head: nil}
-		}
-
-		// 赋值新表（无需原子操作，因为rehash是单goroutine触发）
-		s.ht[1] = newTable
-		log.Printf("rehash started: oldSize=%d, newSize=%d", oldSize, newSize)
-	}
-}
-
-func (s *Segment) segRehash() int {
-	oldTable := s.ht[0]
-	newTable := s.ht[1]
-	if oldTable == nil || newTable == nil {
-		return 0 // 新表未初始化，终止
-	}
-
-	moved := 0
-	// 原子获取当前迁移的桶索引（初始为0，逐步递增）
-	currentIdx := atomic.LoadInt64(&s.rehashIdx)
-	if currentIdx >= int64((*segTable)(oldTable).size) {
-		// 所有桶迁移完成：切换表并重置状态
-		atomic.StorePointer(&s.ht[0], unsafe.Pointer(newTable)) // 旧表指向新表
-		atomic.StorePointer(&s.ht[1], nil)                      // 新表置空
-		atomic.StoreInt64(&s.rehashIdx, -1)                     // 重置rehash状态
-		log.Printf("rehash completed: all %d buckets migrated", (*segTable)(oldTable).size)
-		return moved
-	}
-
-	// 认领当前桶（避免并发迁移同一桶）
-	if atomic.CompareAndSwapInt64(&s.rehashIdx, currentIdx, currentIdx+1) {
-		oldBucket := (*segTable)(oldTable).buckets[currentIdx]
-		if oldBucket == nil {
-			moved++ // 空桶，计数+1
-			return moved
-		}
-
-		// 迁移旧桶的所有节点到新表
-		oldHead := (*dictEntry)(atomic.LoadPointer(&oldBucket.head))
-		for e := oldHead; e != nil; e = e.next {
-			// 计算节点在新表中的桶索引
-			newIdx := hash.Murmur3Hash(e.key) & uint32((*segTable)(newTable).mask)
-			newBucket := (*segTable)(newTable).buckets[newIdx]
-
-			// 创建新节点（next指向新桶的当前head）
-			newEntry := &dictEntry{
-				key:  e.key,
-				val:  e.val,
-				next: (*dictEntry)(atomic.LoadPointer(&newBucket.head)),
+		count0 := 0
+		for _, bucket := range seg.table0.buckets {
+			entry := bucket.head
+			for entry != nil {
+				count0++
+				entry = entry.next
 			}
-			// 原子替换新桶的head（保证读操作安全）
-			atomic.StorePointer(&newBucket.head, unsafe.Pointer(newEntry))
+		}
+		segmentStats["table0_entries"] = count0
+
+		if seg.rehashing {
+			rehashingSegments++
+			segmentStats["rehashing"] = true
+			segmentStats["rehash_idx"] = seg.rehashIdx
+			segmentStats["table1_size"] = seg.table1.size
+			segmentStats["table1_buckets"] = len(seg.table1.buckets)
+
+			// 计算table1中的条目数
+			count1 := 0
+			for _, bucket := range seg.table1.buckets {
+				entry := bucket.head
+				for entry != nil {
+					count1++
+					entry = entry.next
+				}
+			}
+			segmentStats["table1_entries"] = count1
+		} else {
+			segmentStats["rehashing"] = false
 		}
 
-		// 清空旧桶（标记为已迁移）
-		atomic.StorePointer(&oldBucket.head, nil)
-		moved++ // 成功迁移一个桶
+		totalEntries += count0
+		if seg.rehashing {
+			totalEntries += int(segmentStats["table1_entries"].(int))
+		}
+
+		stats[fmt.Sprintf("segment_%d", i)] = segmentStats
+		seg.mu.RUnlock()
 	}
 
-	return moved
+	stats["total_entries"] = totalEntries
+	stats["rehashing_segments"] = rehashingSegments
+	stats["total_segments"] = len(sd.segments)
+
+	return stats
 }

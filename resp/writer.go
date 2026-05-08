@@ -2,6 +2,7 @@ package resp
 
 import (
 	"bytes"
+	"fmt"
 	"strconv"
 )
 
@@ -49,6 +50,28 @@ func (a Array) ToBytes() []byte {
 	}
 
 	return buf.Bytes()
+}
+
+func (a *Array) Reset() {
+	*a = (*a)[:0] // 截断切片长度为 0，底层数组不变
+}
+
+func (a *Array) UnmarshalBinary(buf []byte) error {
+	// 1. 用 ParseRESP 解析整个 RESP 值
+	val, _, err := ParseRESP(buf)
+	if err != nil {
+		return err
+	}
+
+	// 2. 类型断言：确保解析结果是 Array
+	arr, ok := val.(Array)
+	if !ok {
+		return fmt.Errorf("resp: expected array, got %T", val)
+	}
+
+	// 3. 将解析结果赋值给当前 Array 对象
+	*a = arr
+	return nil
 }
 
 type Null struct{}

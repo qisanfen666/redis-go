@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -17,8 +20,14 @@ var (
 	Store       = store.Store
 	redisAddr   = flag.String("addr", ":6380", "redis server address")
 	pprofAddr   = flag.String("pprof", ":6060", "pprof address")
-	maxPipeline = 256
+	maxPipeline       = 256
+	pipelineReadWait  = time.Millisecond // coalesce additional pipelined commands already in flight
 )
+
+func isNetTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
 
 type Client struct {
 	conn net.Conn
@@ -27,11 +36,6 @@ type Client struct {
 	mu   sync.RWMutex
 }
 
-var respArrayPool = sync.Pool{
-	New: func() interface{} {
-		return &resp.Array{}
-	},
-}
 var readerPool = sync.Pool{
 	New: func() interface{} {
 		return bufio.NewReaderSize(nil, 16*1024)
@@ -114,7 +118,7 @@ func loadPersistence() error {
 func startServer() {
 	ln, err := net.Listen("tcp", *redisAddr)
 	if err != nil {
-		log.Printf("listen failed: %v", err)
+		log.Fatalf("listen failed: %v", err)
 	}
 	defer ln.Close()
 
@@ -154,30 +158,52 @@ func handleConn(conn net.Conn) {
 	}
 
 	for {
-		var batch [][]byte
-		conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-
-		for i := 0; i < maxPipeline; i++ {
-			cmd, err := readFullRESP(r)
-			if err != nil {
+		conn.SetReadDeadline(time.Time{})
+		cmd, err := readFullRESP(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
 				return
 			}
-			batch = append(batch, cmd)
+			return
 		}
-		conn.SetReadDeadline(time.Time{})
+		batch := [][]byte{cmd}
 
-		for _, cmd := range batch {
-			val, _, err := resp.ParseRESP(cmd)
-			if err != nil {
-				errResp := resp.Error("ERR protocol error")
-				w.Write(errResp.ToBytes())
-				continue
+		for len(batch) < maxPipeline {
+			if r.Buffered() == 0 {
+				conn.SetReadDeadline(time.Now().Add(pipelineReadWait))
 			}
-			resp := HandleCommand(val)
-			w.Write(resp.ToBytes())
+			cmd2, err := readFullRESP(r)
+			conn.SetReadDeadline(time.Time{})
+			if err != nil {
+				if isNetTimeout(err) {
+					break
+				}
+				if errors.Is(err, io.EOF) {
+					for _, c := range batch {
+						writeCommandReply(w, c)
+					}
+					w.Flush()
+					return
+				}
+				return
+			}
+			batch = append(batch, cmd2)
+		}
+
+		for _, c := range batch {
+			writeCommandReply(w, c)
 		}
 		w.Flush()
 	}
+}
+
+func writeCommandReply(w *bufio.Writer, cmd []byte) {
+	val, _, err := resp.ParseRESP(cmd)
+	if err != nil {
+		w.Write(resp.Error("ERR protocol error").ToBytes())
+		return
+	}
+	w.Write(HandleCommand(val).ToBytes())
 }
 
 func readFullRESP(r *bufio.Reader) ([]byte, error) {
@@ -188,14 +214,13 @@ func readFullRESP(r *bufio.Reader) ([]byte, error) {
 			return nil, err
 		}
 		buf = append(buf, line...)
-		_, remaining, err := resp.ParseRESP(buf)
-		if err == nil && len(remaining) == 0 {
-			arr := respArrayPool.Get().(*resp.Array)
-			arr.Reset()
-			if err := arr.UnmarshalBinary(buf); err == nil {
-				return buf, nil
-			}
-			respArrayPool.Put(arr)
+		val, remaining, err := resp.ParseRESP(buf)
+		if err != nil || len(remaining) > 0 {
+			continue
 		}
+		if _, ok := val.(resp.Array); !ok {
+			return nil, fmt.Errorf("ERR protocol error: expected array")
+		}
+		return buf, nil
 	}
 }

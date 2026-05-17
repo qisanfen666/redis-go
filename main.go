@@ -17,11 +17,11 @@ import (
 )
 
 var (
-	Store       = store.Store
-	redisAddr   = flag.String("addr", ":6380", "redis server address")
-	pprofAddr   = flag.String("pprof", ":6060", "pprof address")
-	maxPipeline       = 256
-	pipelineReadWait  = time.Millisecond // coalesce additional pipelined commands already in flight
+	Store            = store.Store
+	redisAddr        = flag.String("addr", ":6380", "redis server address")
+	pprofAddr        = flag.String("pprof", ":6060", "pprof address")
+	maxPipeline      = 256
+	pipelineReadWait = time.Millisecond // coalesce additional pipelined commands already in flight
 )
 
 func isNetTimeout(err error) bool {

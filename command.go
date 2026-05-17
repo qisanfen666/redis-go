@@ -66,10 +66,10 @@ func HandleCommand(v resp.RespValue) resp.RespValue {
 	case "CONFIG":
 		return config(arr)
 	case "BGREWRITEAOF":
-	 	bgReWriteAOF()
-	 	return resp.SimpleString("Background AOF rewrite started")
-	// case "BGSAVE":
-	// 	return bgsave()
+		bgReWriteAOF()
+		return resp.SimpleString("Background AOF rewrite started")
+	case "BGSAVE":
+		return bgsave()
 	case "INFO":
 		return info(arr)
 	default:

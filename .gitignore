@@ -1,3 +1,4 @@
 appendonly.aof
+dump.rdb
 *.txt
 *.tar.gz

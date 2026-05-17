@@ -1,219 +1,287 @@
 package main
 
-// import (
-// 	"bufio"
-// 	"context"
-// 	"io"
-// 	"log"
-// 	"os"
-// 	"redis-go/resp"
-// 	"strconv"
-// 	"sync"
-// 	"time"
-// )
+import (
+	"bufio"
+	"context"
+	"io"
+	"log"
+	"os"
+	"redis-go/resp"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
-// const aofFileName = "appendonly.aof"
+const aofFileName = "appendonly.aof"
 
-// var (
-// 	aofMu    sync.RWMutex
-// 	aofFile  *os.File
-// 	aofBuf   *bufio.Writer
-// 	aofState int32  = 1
-// 	fsPolicy string = "everysec"
-// )
+type aof struct {
+	mu sync.Mutex
+	enabled bool
+	file *os.File
+	buf *bufio.Writer
+	policy string
+}
 
-// func initAOF() error {
-// 	aofMu.Lock()
-// 	defer aofMu.Unlock()
+var (
+	globalAOF    aof
+	fsyncCancel  context.CancelFunc
+	aofReplaying atomic.Bool
+)
 
-// 	f, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	aofFile = f
-// 	aofBuf = bufio.NewWriter(f)
-// 	return nil
-// }
+func initAOF() error {
+	globalAOF.mu.Lock()
+	defer globalAOF.mu.Unlock()
 
-// func closeAOF() {
-// 	aofMu.Lock()
-// 	defer aofMu.Unlock()
+	if globalAOF.file != nil {
+		return nil
+	}
 
-// 	if aofBuf != nil {
-// 		aofBuf.Flush()
-// 	}
-// 	if aofFile != nil {
-// 		aofFile.Sync()
-// 		aofFile.Close()
-// 	}
-// }
+	f, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+ 	if err != nil {
+ 		return err
+ 	}
 
-// func appendAOF(cmd []string) {
-// 	if aofState == 0 {
-// 		return
-// 	}
-// 	aofMu.Lock()
-// 	defer aofMu.Unlock()
+	globalAOF.file = f
+	globalAOF.buf = bufio.NewWriter(f)
+	if globalAOF.policy == "" {
+		globalAOF.policy = "everysec"
+	}
 
-// 	aofBuf.WriteByte('*')
-// 	aofBuf.WriteString(strconv.Itoa(len(cmd)))
-// 	aofBuf.WriteString("\r\n")
-// 	for _, arg := range cmd {
-// 		aofBuf.WriteByte('$')
-// 		aofBuf.WriteString(strconv.Itoa(len(arg)))
-// 		aofBuf.WriteString("\r\n")
-// 		aofBuf.WriteString(arg)
-// 		aofBuf.WriteString("\r\n")
-// 	}
+	return nil
+}
 
-// }
+func closeAOF() {
+	globalAOF.mu.Lock()
+	defer globalAOF.mu.Unlock()
 
-// func aofFsyncEverySec(ctx context.Context) {
-// 	if fsPolicy != "everysec" {
-// 		return
-// 	}
-// 	tick := time.NewTicker(time.Second)
-// 	defer tick.Stop()
+	stopFsyncWorkerLocked()
 
-// 	for {
-// 		select {
-// 		case <-ctx.Done():
-// 			return
-// 		case <-tick.C:
-// 			aofMu.Lock()
-// 			if aofBuf != nil {
-// 				aofBuf.Flush()
-// 			}
-// 			if aofFile != nil {
-// 				aofFile.Sync()
-// 			}
-// 			aofMu.Unlock()
-// 		}
-// 	}
-// }
+ 	if globalAOF.buf != nil {
+ 		_ = globalAOF.buf.Flush()
+ 	}
+ 	if globalAOF.file != nil {
+ 		_ = globalAOF.file.Sync()
+ 		_ = globalAOF.file.Close()
+ 	}
+	globalAOF.file = nil
+	globalAOF.buf = nil
+	globalAOF.enabled = false
+	log.Println("AOF disabled")
+}
 
-// func bgReWriteAOF() {
-// 	log.Println("bgReWriteAOF start")
+func enableAOF() {
+	globalAOF.mu.Lock()
+	defer globalAOF.mu.Unlock()
 
-// 	temp := aofFileName + ".tmp"
-// 	f, err := os.Create(temp)
-// 	if err != nil {
-// 		log.Println("bgReWriteAOF create temp file error:", err)
-// 		return
-// 	// }
-// 	w := bufio.NewWriter(f)
+	if globalAOF.file == nil {
+		f,err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Println("enableAOF open file error:", err)
+			return
+		}
+		globalAOF.file = f
+		globalAOF.buf = bufio.NewWriter(f)
+	}
 
-// 	Store.Scan(func(cmd []string) {
-// 		writeRespArray(w, cmd)
-// 	})
+	globalAOF.enabled = true
+	startFsyncWorkerLocked()
+	log.Println("AOF enabled")
+}
 
-// 	w.Flush()
-// 	f.Sync()
-// 	f.Close()
+func disableAOF() {
+	globalAOF.mu.Lock()
+	defer globalAOF.mu.Unlock()
 
-// 	os.Rename(temp, aofFileName)
-// 	log.Println("bgReWriteAOF done")
-// }
+	if !globalAOF.enabled {
+		return
+	}
 
-// func loadAOF() error {
-// 	f, err := os.Open(aofFileName)
-// 	if os.IsNotExist(err) {
-// 		return nil
-// 	}
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer f.Close()
+	stopFsyncWorkerLocked()
+	if globalAOF.buf != nil {
+		_ = globalAOF.buf.Flush()
+	}
+	if globalAOF.file != nil {
+		_ = globalAOF.file.Sync()
+		_ = globalAOF.file.Close()
+	}
+	globalAOF.file = nil
+	globalAOF.buf = nil
+	globalAOF.enabled = false
+	log.Println("AOF disabled")
+}
 
-// 	r := bufio.NewReader(f)
-// 	for {
-// 		raw, err := readFullRESP(r)
-// 		if err == io.EOF {
-// 			break
-// 		}
-// 		if err != nil {
-// 			log.Printf("[AOF] readFullRESP error: %v", err)
-// 			continue
-// 		}
+func setFsyncPolicy(pol string) {
+	globalAOF.mu.Lock()
+	defer globalAOF.mu.Unlock()
 
-// 		val, _, err := resp.ParseRESP(append([]byte{}, raw...))
-// 		if err != nil {
-// 			log.Printf("[AOF] ParseRESP error: %v", err)
-// 			continue
-// 		}
-// 		HandleCommand(val, nil)
-// 	}
-// 	return nil
-// }
+	globalAOF.policy = pol
+	if globalAOF.enabled {
+		stopFsyncWorkerLocked()
+		startFsyncWorkerLocked()
+	}
+}
 
-// func writeRespArray(w *bufio.Writer, args []string) {
-// 	w.WriteByte('*')
-// 	w.WriteString(strconv.Itoa(len(args)))
-// 	w.WriteString("\r\n")
-// 	for _, s := range args {
-// 		w.WriteByte('$')
-// 		w.WriteString(strconv.Itoa(len(s)))
-// 		w.WriteString("\r\n")
-// 		w.WriteString(s)
-// 		w.WriteString("\r\n")
-// 	}
-// }
+func appendAOF(args []string) {
+	if aofReplaying.Load() {
+		return 
+	}
 
-// var fsyncCancel func()
+	globalAOF.mu.Lock()
+	defer globalAOF.mu.Unlock()
 
-// func enableAOF() {
-// 	aofMu.Lock()
-// 	defer aofMu.Unlock()
+	if !globalAOF.enabled || globalAOF.buf == nil {
+		return 
+	}
 
-// 	f, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-// 	if err != nil {
-// 		log.Println("enableAOF open file error:", err)
-// 		return
-// 	}
-// 	aofFile = f
-// 	aofBuf = bufio.NewWriter(f)
-// 	aofState = 1
+	writeRespArray(globalAOF.buf,args)
 
-// 	if fsPolicy == "everysec" {
-// 		ctx, cancel := context.WithCancel(context.Background())
-// 		fsyncCancel = cancel
-// 		go aofFsyncEverySec(ctx)
-// 	}
-// 	log.Println("AOF enabled")
-// }
+	switch globalAOF.policy {
+		case "always":
+			_ = globalAOF.buf.Flush()
+			_ = globalAOF.file.Sync()
+		case "everysec":
+			_ = globalAOF.buf.Flush()
+		case "no":
+		default:
+			log.Println("unknown fsync policy:", globalAOF.policy)
+	}
+}
 
-// func disableAOF() {
-// 	aofMu.Lock()
-// 	defer aofMu.Unlock()
+func loadAOF() error {
+	f,err := os.Open(aofFileName)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 
-// 	if aofState == 0 {
-// 		return
-// 	}
+	aofReplaying.Store(true)
+	defer aofReplaying.Store(false)
 
-// 	if fsyncCancel != nil {
-// 		fsyncCancel()
-// 		fsyncCancel = nil
-// 	}
+	r := bufio.NewReader(f)
+	for {
+		raw, err := readFullRESP(r)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Printf("[AOF] readFullRESP error: %v", err)
+			continue
+		}
 
-// 	aofBuf.Flush()
-// 	aofFile.Sync()
-// 	aofFile.Close()
-// 	aofState = 0
-// 	log.Println("AOF disabled")
-// }
+		val, _, err := resp.ParseRESP(raw)
+		if err != nil {
+			log.Printf("[AOF] ParseRESP error: %v", err)
+			continue
+		}
+		HandleCommand(val)
+	}
+	return nil
+}
 
-// func setFsyncPolicy(pol string) {
-// 	aofMu.Lock()
-// 	defer aofMu.Unlock()
+func writeRespArray(w *bufio.Writer,args []string) {
+	_, _ = w.WriteString("*")
+	_, _ = w.WriteString(strconv.Itoa(len(args)))
+	_, _ = w.WriteString("\r\n")
+	for _, arg := range args {
+		_, _ = w.WriteString("$")
+		_, _ = w.WriteString(strconv.Itoa(len(arg)))
+		_, _ = w.WriteString("\r\n")
+		_, _ = w.WriteString(arg)
+		_, _ = w.WriteString("\r\n")
+	}
+}
 
-// 	fsPolicy = pol
+func startFsyncWorkerLocked() {
+	if globalAOF.policy != "everysec" {
+		return 
+	}
+	stopFsyncWorkerLocked()
+	
+	ctx,cancel := context.WithCancel(context.Background())
+	fsyncCancel = cancel
+	go aofFsyncEverySec(ctx)
+}
 
-// 	if aofState == 1 && pol == "everysec" {
-// 		if fsyncCancel != nil {
-// 			fsyncCancel()
-// 		}
-// 		ctx, cancel := context.WithCancel(context.Background())
-// 		fsyncCancel = cancel
-// 		go aofFsyncEverySec(ctx)
-// 	}
-// }
+func stopFsyncWorkerLocked() {
+	if fsyncCancel != nil {
+		fsyncCancel()
+		fsyncCancel = nil
+	}
+}
+
+func aofFsyncEverySec(ctx context.Context) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return 
+		case <-tick.C:
+			globalAOF.mu.Lock()
+			if globalAOF.enabled && globalAOF.buf != nil {
+				_ = globalAOF.buf.Flush()
+			}
+			if globalAOF.enabled && globalAOF.file != nil {
+				_ = globalAOF.file.Sync()
+			}
+			globalAOF.mu.Unlock()
+		}
+	}
+}
+
+func bgReWriteAOF() {
+	log.Println("bgRewriteAOF start")
+
+	globalAOF.mu.Lock()
+	defer globalAOF.mu.Unlock()
+
+	tmp := aofFileName + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		log.Printf("bgrewriteaof create: %v", err)
+		return 
+	}
+	w := bufio.NewWriter(f)
+
+	Store.Scan(func(key,value string) {
+		writeRespArray(w,[]string{"SET",key,value})
+	})
+
+	_ = w.Flush()
+	_ = f.Sync()
+	_ = f.Close()
+
+	// Windows 上必须先关闭正在追加的 AOF，否则 Remove/Rename 会失败，.tmp 会残留
+	if globalAOF.buf != nil {
+		_ = globalAOF.buf.Flush()
+		globalAOF.buf = nil
+	}
+	if globalAOF.file != nil {
+		_ = globalAOF.file.Close()
+		globalAOF.file = nil
+	}
+
+	if err := os.Remove(aofFileName); err != nil && !os.IsNotExist(err) {
+		log.Printf("bgrewriteaof remove old: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, aofFileName); err != nil {
+		log.Printf("bgrewriteaof rename: %v", err)
+		return
+	}
+
+	nf, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("bgrewriteaof reopen: %v", err)
+		return
+	}
+	globalAOF.file = nf
+	globalAOF.buf = bufio.NewWriter(nf)
+
+	log.Println("bgrewriteaof done")
+}

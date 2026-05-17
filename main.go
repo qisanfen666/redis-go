@@ -62,6 +62,7 @@ func main() {
 	if err := loadPersistence(); err != nil {
 		log.Printf("WARN: load persistence failed: %v", err)
 	}
+	defer closeAOF()
 
 	//启动服务
 	startServer()
@@ -111,6 +112,16 @@ func main() {
 
 func loadPersistence() error {
 	//加载aof
+	if err := initAOF(); err != nil {
+		return err
+	}
+	if err := loadAOF(); err != nil {
+		return err
+	}
+	if isAppendOnlyEnabled() {
+		setFsyncPolicy(configAppendFsync())
+		enableAOF()
+	}
 	//加载rdb
 	return nil
 }

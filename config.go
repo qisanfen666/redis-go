@@ -70,10 +70,10 @@ func configSet(arr resp.Array) resp.RespValue {
 		pol := strings.ToLower(string(bs))
 		switch pol {
 		case "yes":
-			//enableAOF()
+			enableAOF()
 			configMap[key] = resp.Array{resp.BulkString("yes")}
 		case "no":
-			//disableAOF()
+			disableAOF()
 			configMap[key] = resp.Array{resp.BulkString("no")}
 		default:
 			return resp.Error("ERR appendonly must be 'yes' or 'no'")
@@ -86,7 +86,7 @@ func configSet(arr resp.Array) resp.RespValue {
 		pol := strings.ToLower(string(bs))
 		switch pol {
 		case "always", "everysec", "no":
-			//setFsyncPolicy(pol)
+			setFsyncPolicy(pol)
 			configMap[key] = resp.Array{resp.BulkString(pol)}
 		default:
 			return resp.Error("ERR unsupported appendfsync policy")
@@ -96,6 +96,39 @@ func configSet(arr resp.Array) resp.RespValue {
 	}
 
 	return resp.SimpleString("OK")
+}
+
+// isAppendOnlyEnabled 读取 configMap 中 appendonly 是否为 yes
+func isAppendOnlyEnabled() bool {
+	val, ok := configMap["appendonly"]
+	if !ok {
+		return false
+	}
+	arr, ok := val.(resp.Array)
+	if !ok || len(arr) == 0 {
+		return false
+	}
+	bs, ok := arr[0].(resp.BulkString)
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(string(bs), "yes")
+}
+
+func configAppendFsync() string {
+	val, ok := configMap["appendfsync"]
+	if !ok {
+		return "everysec"
+	}
+	arr, ok := val.(resp.Array)
+	if !ok || len(arr) == 0 {
+		return "everysec"
+	}
+	bs, ok := arr[0].(resp.BulkString)
+	if !ok {
+		return "everysec"
+	}
+	return strings.ToLower(string(bs))
 }
 
 func evictPolicyFromString(s string) evict.Policy {

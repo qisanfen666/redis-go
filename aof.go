@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-const aofFileName = "appendonly.aof"
+const aofFileName = "./data/appendonly.aof"
 
 type aof struct {
-	mu sync.Mutex
+	mu      sync.Mutex
 	enabled bool
-	file *os.File
-	buf *bufio.Writer
-	policy string
+	file    *os.File
+	buf     *bufio.Writer
+	policy  string
 }
 
 var (
@@ -38,9 +38,9 @@ func initAOF() error {
 	}
 
 	f, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
- 	if err != nil {
- 		return err
- 	}
+	if err != nil {
+		return err
+	}
 
 	globalAOF.file = f
 	globalAOF.buf = bufio.NewWriter(f)
@@ -57,13 +57,13 @@ func closeAOF() {
 
 	stopFsyncWorkerLocked()
 
- 	if globalAOF.buf != nil {
- 		_ = globalAOF.buf.Flush()
- 	}
- 	if globalAOF.file != nil {
- 		_ = globalAOF.file.Sync()
- 		_ = globalAOF.file.Close()
- 	}
+	if globalAOF.buf != nil {
+		_ = globalAOF.buf.Flush()
+	}
+	if globalAOF.file != nil {
+		_ = globalAOF.file.Sync()
+		_ = globalAOF.file.Close()
+	}
 	globalAOF.file = nil
 	globalAOF.buf = nil
 	globalAOF.enabled = false
@@ -75,7 +75,7 @@ func enableAOF() {
 	defer globalAOF.mu.Unlock()
 
 	if globalAOF.file == nil {
-		f,err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		f, err := os.OpenFile(aofFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			log.Println("enableAOF open file error:", err)
 			return
@@ -124,32 +124,32 @@ func setFsyncPolicy(pol string) {
 
 func appendAOF(args []string) {
 	if aofReplaying.Load() {
-		return 
+		return
 	}
 
 	globalAOF.mu.Lock()
 	defer globalAOF.mu.Unlock()
 
 	if !globalAOF.enabled || globalAOF.buf == nil {
-		return 
+		return
 	}
 
-	writeRespArray(globalAOF.buf,args)
+	writeRespArray(globalAOF.buf, args)
 
 	switch globalAOF.policy {
-		case "always":
-			_ = globalAOF.buf.Flush()
-			_ = globalAOF.file.Sync()
-		case "everysec":
-			_ = globalAOF.buf.Flush()
-		case "no":
-		default:
-			log.Println("unknown fsync policy:", globalAOF.policy)
+	case "always":
+		_ = globalAOF.buf.Flush()
+		_ = globalAOF.file.Sync()
+	case "everysec":
+		_ = globalAOF.buf.Flush()
+	case "no":
+	default:
+		log.Println("unknown fsync policy:", globalAOF.policy)
 	}
 }
 
 func loadAOF() error {
-	f,err := os.Open(aofFileName)
+	f, err := os.Open(aofFileName)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -182,7 +182,7 @@ func loadAOF() error {
 	return nil
 }
 
-func writeRespArray(w *bufio.Writer,args []string) {
+func writeRespArray(w *bufio.Writer, args []string) {
 	_, _ = w.WriteString("*")
 	_, _ = w.WriteString(strconv.Itoa(len(args)))
 	_, _ = w.WriteString("\r\n")
@@ -197,11 +197,11 @@ func writeRespArray(w *bufio.Writer,args []string) {
 
 func startFsyncWorkerLocked() {
 	if globalAOF.policy != "everysec" {
-		return 
+		return
 	}
 	stopFsyncWorkerLocked()
-	
-	ctx,cancel := context.WithCancel(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
 	fsyncCancel = cancel
 	go aofFsyncEverySec(ctx)
 }
@@ -220,7 +220,7 @@ func aofFsyncEverySec(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return 
+			return
 		case <-tick.C:
 			globalAOF.mu.Lock()
 			if globalAOF.enabled && globalAOF.buf != nil {
@@ -244,12 +244,12 @@ func bgReWriteAOF() {
 	f, err := os.Create(tmp)
 	if err != nil {
 		log.Printf("bgrewriteaof create: %v", err)
-		return 
+		return
 	}
 	w := bufio.NewWriter(f)
 
-	Store.Scan(func(key,value string) {
-		writeRespArray(w,[]string{"SET",key,value})
+	Store.Scan(func(key, value string) {
+		writeRespArray(w, []string{"SET", key, value})
 	})
 
 	_ = w.Flush()

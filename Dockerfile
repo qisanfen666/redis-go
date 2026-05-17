@@ -19,8 +19,10 @@ FROM alpine:latest
 
 WORKDIR /app
 
+RUN mkdir -p /app/data
+
 COPY --from=builder /app/redis-go ./
 
 EXPOSE 6380 6060
 
-CMD ["./redis-go","-addr",":6380","-pprof",":6060"]
+CMD ["./redis-go", "-addr", ":6380", "-pprof", ":6060"]

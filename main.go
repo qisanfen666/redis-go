@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"redis-go/resp"
 	"redis-go/store"
 	"sync"
@@ -49,6 +50,11 @@ var writerPool = sync.Pool{
 
 func main() {
 	flag.Parse()
+
+	//创建数据目录
+	if err := os.MkdirAll("./data", 0755); err != nil {
+		log.Fatalf("create data dir failed: %v", err)
+	}
 
 	//性能分析server
 	if *pprofAddr != "" {

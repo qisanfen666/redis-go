@@ -37,7 +37,7 @@ func bgsave() resp.RespValue {
 }
 
 func doSave() error {
-	tmp := "dump.rdb.tmp"
+	tmp := "./data/dump.rdb.tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
@@ -77,11 +77,11 @@ func doSave() error {
 
 	f.Close()
 
-	return os.Rename(tmp, "dump.rdb")
+	return os.Rename(tmp, "./data/dump.rdb")
 }
 
 func loadRDB() error {
-	f, err := os.Open("dump.rdb")
+	f, err := os.Open("./data/dump.rdb")
 	if os.IsNotExist(err) {
 		return nil // 文件不存在，跳过加载
 	}
